@@ -1666,7 +1666,8 @@ function scoreCls(s) { return s >= 80 ? "s-hi" : s >= 60 ? "s-mid" : ""; }
 function postPills(c) {
   return Object.values(c.posts || {}).filter(p => p.status !== "cancelled").map(p => {
     const cls = p.status === "posted" ? "ok" : p.status === "failed" ? "bad" : "warn";
-    const txt = `${esc(p.account_name)} · ${p.status === "scheduled" ? clock(p.due_at) : p.status}`;
+    const isNow = p.status === "scheduled" && p.due_at <= Date.now() / 1000 + 10;
+    const txt = `${esc(p.account_name)} · ${p.status === "posted" ? "Posted" : p.status === "posting" ? "uploading…" : isNow ? "publishing now…" : clock(p.due_at)}`;
     return p.url ? `<a class="pill ${cls}" href="${esc(p.url)}" target="_blank" rel="noopener">${txt}</a>` : `<span class="pill ${cls}" title="${esc(p.error || "")}">${txt}</span>`;
   }).join("");
 }
@@ -2119,6 +2120,56 @@ async function drawSettings() {
 async function saveSettings() { const d = {}; $$("#sform [data-s]").forEach(i => d[i.dataset.s] = i.value); await send("/api/settings", d, "PUT"); }
 
 /* ============================================================ clip editor */
+function postControlsHtml(c) {
+  if (!S.accounts.length) {
+    return `<p class="help">No accounts connected yet. Connect one in Settings.</p>`;
+  }
+  const rows = [];
+  const availableAccs = [];
+  for (const a of S.accounts) {
+    const posts = Object.values(c.posts || {}).filter(p => (p.account && p.account === a.id) || (p.account_name === a.name && p.platform === a.platform));
+    const prio = {posting: 1, scheduled: 2, posted: 3, failed: 4, cancelled: 5};
+    posts.sort((x, y) => (prio[x.status] || 99) - (prio[y.status] || 99));
+    const p = posts[0] || null;
+    const status = p ? p.status : "none";
+    const isNow = status === "scheduled" && p.due_at <= Date.now() / 1000 + 10;
+
+    if (status === "posted") {
+      rows.push(`<div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
+        <span class="pill ok">${esc(a.name)} · Posted</span>
+        <a class="btn sm ghost" href="${esc(p.url || '#')}" target="_blank" rel="noopener">${ic("play")}View on ${esc(a.platform === "youtube" ? "YouTube" : a.label || a.platform)}</a>
+      </div>`);
+    } else if (status === "posting") {
+      rows.push(`<div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
+        <span class="pill warn"><span class="dot"></span>${esc(a.name)} · Upload in progress</span>
+      </div>`);
+    } else if (status === "scheduled" && isNow) {
+      rows.push(`<div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
+        <span class="pill warn"><span class="dot"></span>${esc(a.name)} · Publishing now…</span>
+      </div>`);
+    } else if (status === "scheduled") {
+      rows.push(`<div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
+        <span class="pill warn">${esc(a.name)} · Scheduled for ${clock(p.due_at)}</span>
+        <button class="btn sm primary" data-act="publishnow" data-pid="${esc(p.id)}" data-aid="${esc(a.id)}">${ic("send")}Publish now</button>
+        <button class="btn sm ghost" data-act="pcancel" data-id="${esc(p.id)}">Cancel</button>
+      </div>`);
+    } else if (status === "failed") {
+      rows.push(`<div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
+        <span class="pill bad" title="${esc(p.error || '')}">${esc(a.name)} · Failed</span>
+        <button class="btn sm" data-act="pretry" data-id="${esc(p.id)}">Retry</button>
+      </div>`);
+    } else {
+      availableAccs.push({account: a, cancelled: status === "cancelled"});
+    }
+  }
+
+  let html = rows.join("");
+  if (availableAccs.length) {
+    html += `<div class="row" style="margin-top:6px;gap:12px">${availableAccs.map(x => `<label class="ck"><input type="checkbox" data-pacc value="${esc(x.account.id)}">${esc(x.account.label || x.account.platform)} · ${esc(x.account.name)}${x.cancelled ? " (Cancelled)" : ""}</label>`).join("")}</div>
+      <div class="row" style="margin-top:8px"><button class="btn primary" data-act="postnow">${ic("send")}Post now</button><button class="btn" data-act="postqueue">Add to queue</button></div>`;
+  }
+  return html;
+}
 function openClip(jid, cid) { D.jid = jid; D.cid = cid; D.sig = ""; drawClipDlg(true); $("#clipdlg").showModal(); }
 function drawClipDlg(full) {
   const j = jobOf(D.jid), c = j?.clips.find(x => x.id === D.cid), dlg = $("#clipdlg");
@@ -2144,9 +2195,7 @@ function drawClipDlg(full) {
         <button class="btn" data-act="remake">${ic("scissors")}Save and re-make clip</button>
         <h3>Post it</h3>
         <div id="dposts" class="row" style="gap:4px"></div>
-        ${S.accounts.length ? `<div class="row">${S.accounts.map(a => `<label class="ck"><input type="checkbox" data-pacc value="${esc(a.id)}">${esc(a.label)} · ${esc(a.name)}</label>`).join("")}</div>
-          <div class="row"><button class="btn primary" data-act="postnow">${ic("send")}Post now</button><button class="btn" data-act="postqueue">Add to queue</button></div>`
-          : `<p class="help">No accounts connected yet. Connect one in Settings.</p>`}
+        <div id="dpostctrls">${postControlsHtml(c)}</div>
         <div class="row" style="margin-top:auto;padding-top:8px;border-top:1px solid var(--line)">
           ${c.status === "done" ? `<a class="btn" href="${m}${esc(c.file)}?download=1">${ic("down")}Download</a>` : ""}
           <button class="btn" data-act="copy" data-j="${j.id}" data-c="${esc(c.id)}">${ic("copy")}Copy post text</button></div>
@@ -2154,6 +2203,7 @@ function drawClipDlg(full) {
   } else if (D.sig !== sig) $("#stage").innerHTML = stage;
   D.sig = sig;
   put($("#dposts"), postPills(c));
+  if ($("#dpostctrls")) put($("#dpostctrls"), postControlsHtml(c));
 }
 $("#clipdlg").addEventListener("close", () => { $("#clipdlg").innerHTML = ""; D.jid = null; });
 $("#clipdlg").addEventListener("click", e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
@@ -2425,7 +2475,25 @@ document.addEventListener("click", async e => {
     if (a === "csave") return void await saveCreator();
     if (a === "cdiscard") { drawCreatorForm(); return toast("Changes discarded"); }
     if (a === "pause") { await send("/api/settings", {paused:!S.overview.paused}, "PUT"); return loadOverview(); }
-    if (a === "pcancel" || a === "pretry") { await api(`/api/posts/${d.id}/${a === "pcancel" ? "cancel" : "retry"}`, {method:"POST"}); return loadOverview(); }
+    if (a === "pcancel" || a === "pretry") {
+      await api(`/api/posts/${d.id}/${a === "pcancel" ? "cancel" : "retry"}`, {method:"POST"});
+      toast(a === "pcancel" ? "Post cancelled" : "Retrying post…", "ok");
+      await tick();
+      if (D.jid) drawClipDlg(false);
+      if (S.view === "overview") loadOverview();
+      return;
+    }
+    if (a === "publishnow") {
+      if (!await ask("Publish now?", "This clip's existing schedule will be replaced with immediate publication.", "Publish now")) return;
+      const r = await send("/api/posts", {job: D.jid, clip: D.cid, accounts: [d.aid], now: true});
+      toast("Publishing now", "ok");
+      const j = jobOf(D.jid), c = j?.clips.find(x => x.id === D.cid);
+      if (c && c.posts && c.posts[d.pid]) {
+        c.posts[d.pid].due_at = Date.now() / 1000;
+      }
+      drawClipDlg(false);
+      return tick();
+    }
     if (a === "ssave") { await saveSettings(); toast("Saved", "ok"); return drawSettings(); }
     if (a === "plansave") {
       const p = {}; $$("#sform [data-plan]").forEach(i => { (p[i.dataset.plan] ??= {})[i.dataset.f] = Number(i.value); });
@@ -2443,9 +2511,25 @@ document.addEventListener("click", async e => {
     if (a === "postnow" || a === "postqueue") {
       const accs = $$("#clipdlg [data-pacc]:checked").map(i => i.value);
       if (!accs.length) return toast("Tick at least one account first.", "bad");
-      if (a === "postnow" && !await ask("Post now?", `This clip goes to ${accs.length} account${accs.length > 1 ? "s" : ""} straight away.`, "Post now")) return;
-      await send("/api/posts", {job:D.jid, clip:D.cid, accounts:accs, now:a === "postnow"});
-      toast(a === "postnow" ? "Posting now" : "Added to the queue", "ok"); return tick();
+      if (a === "postnow" && !await ask("Post now?", `This clip will be published to ${accs.length} account${accs.length > 1 ? "s" : ""} straight away.`, "Post now")) return;
+      const r = await send("/api/posts", {job:D.jid, clip:D.cid, accounts:accs, now:a === "postnow"});
+      if (r.already_posted && !r.queued && !r.expedited) {
+        toast(r.message || "Already posted to that account.", "ok");
+      } else if (r.already_uploading && !r.queued && !r.expedited) {
+        toast("Upload already in progress.", "ok");
+      } else {
+        toast(a === "postnow" ? "Posting now" : "Added to the queue", "ok");
+      }
+      if (a === "postnow") {
+        const j = jobOf(D.jid), c = j?.clips.find(x => x.id === D.cid);
+        if (c && c.posts) {
+          Object.values(c.posts).forEach(p => {
+            if (accs.includes(p.account)) p.due_at = Date.now() / 1000;
+          });
+        }
+      }
+      drawClipDlg(false);
+      return tick();
     }
   } catch (err) { b.disabled = false; toast(err.message, "bad"); }
 });

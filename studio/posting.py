@@ -9,11 +9,17 @@ import json
 from . import accounts, alerts, config, creators, ctx, jobs, live
 
 _lock = threading.RLock()
+_wake = threading.Event()
 _FILE = config.DATA_DIR / "posts.json"
 try:
     _posts: list = json.loads(_FILE.read_text(encoding="utf-8")) if _FILE.exists() else []
 except ValueError:
     _posts = []
+
+
+def wake():
+    """Wake the posting worker immediately when a job is ready or expedited."""
+    _wake.set()
 
 
 def _mine() -> list:
@@ -38,7 +44,9 @@ def _mirror(p):
     job = jobs.get(p["job"])
     clip = next((c for c in job["clips"] if c["id"] == p["clip"]), None) if job else None
     if clip is not None:
-        clip.setdefault("posts", {})[p["id"]] = {k: p.get(k) for k in ("account_name", "platform", "status", "url", "due_at", "error")}
+        clip.setdefault("posts", {})[p["id"]] = {
+            k: p.get(k) for k in ("id", "account", "account_name", "platform", "status", "url", "due_at", "error")
+        }
         jobs.save(job)
 
 
@@ -54,40 +62,106 @@ def _next_slot(account_id, gap_min, cap):
     return t
 
 
-def enqueue(job, clip, account_ids, now=False) -> list:
+class EnqueueResult(list):
+    """List of posts newly queued or expedited, with metadata about already-present items."""
+    def __init__(self, items=None, made=None, expedited=None, already_posted=None, already_uploading=None, already_scheduled=None):
+        super().__init__(items or [])
+        self.made = made or []
+        self.expedited = expedited or []
+        self.already_posted = already_posted or []
+        self.already_uploading = already_uploading or []
+        self.already_scheduled = already_scheduled or []
+
+
+def enqueue(job, clip, account_ids, now=False) -> EnqueueResult:
     c = creators.get(job["creator"]) or creators.DEFAULTS
     made = []
+    expedited = []
+    already_posted = []
+    already_uploading = []
+    already_scheduled = []
+
     with _lock:
+        mine = _mine()
         for aid in account_ids:
             acc = accounts.get(aid)
             if not acc:
                 continue
-            if any(p["job"] == job["id"] and p["clip"] == clip["id"] and p["account"] == aid
-                   and p["status"] in OPEN + ("posted",) for p in _mine()):
-                continue  # never post the same clip to the same account twice
+
+            existing = [p for p in mine if p.get("job") == job["id"] and p.get("clip") == clip["id"] and p.get("account") == aid]
+
+            # Already successfully published: never duplicate
+            posted_post = next((p for p in existing if p["status"] == "posted"), None)
+            if posted_post:
+                already_posted.append(posted_post)
+                continue
+
+            # Currently uploading: let it finish
+            posting_post = next((p for p in existing if p["status"] == "posting"), None)
+            if posting_post:
+                already_uploading.append(posting_post)
+                continue
+
+            # Already scheduled: if now=True, move due time to now immediately; otherwise keep slot
+            scheduled_post = next((p for p in existing if p["status"] == "scheduled"), None)
+            if scheduled_post:
+                if now:
+                    scheduled_post["due_at"] = time.time()
+                    scheduled_post["error"] = None
+                    expedited.append(scheduled_post)
+                    wake()
+                else:
+                    already_scheduled.append(scheduled_post)
+                continue
+
+            # If previously cancelled or failed, reactivate this post record
+            reusable_post = next((p for p in existing if p["status"] in ("cancelled", "failed")), None)
             due = time.time() if now else _next_slot(aid, c["post_gap_min"], c["daily_cap"])
-            p = {"id": secrets.token_hex(8), "user": ctx.uid(), "job": job["id"], "clip": clip["id"], "creator": job["creator"],
-                 "account": aid, "account_name": acc["name"], "platform": acc["platform"], "status": "scheduled",
-                 "due_at": due, "created": time.time(), "title": clip.get("title") or clip.get("hook") or "Clip",
-                 "score": clip.get("score", 0), "tries": 0, "url": "", "remote_id": "", "error": None, "views": None}
-            _posts.append(p)
-            made.append(p)
-        _save()
-    for p in made:
+            if reusable_post:
+                reusable_post.update(status="scheduled", due_at=due, tries=0, error=None,
+                                     title=clip.get("title") or clip.get("hook") or "Clip",
+                                     score=clip.get("score", 0))
+                made.append(reusable_post)
+                if now:
+                    wake()
+            else:
+                p = {"id": secrets.token_hex(8), "user": ctx.uid(), "job": job["id"], "clip": clip["id"], "creator": job["creator"],
+                     "account": aid, "account_name": acc["name"], "platform": acc["platform"], "status": "scheduled",
+                     "due_at": due, "created": time.time(), "title": clip.get("title") or clip.get("hook") or "Clip",
+                     "score": clip.get("score", 0), "tries": 0, "url": "", "remote_id": "", "error": None, "views": None}
+                _posts.append(p)
+                made.append(p)
+                if now:
+                    wake()
+
+        if made or expedited:
+            _save()
+
+    for p in made + expedited:
         _mirror(p)
-    return made
+
+    return EnqueueResult(
+        items=made + expedited,
+        made=made,
+        expedited=expedited,
+        already_posted=already_posted,
+        already_uploading=already_uploading,
+        already_scheduled=already_scheduled,
+    )
 
 
 def on_clip_ready(job, clip):
     """Called once when a clip first finishes rendering."""
-    c = creators.get(job["creator"])
-    if not c or not c["autopost"] or not c["accounts"]:
-        return
-    if clip.get("score", 0) < c["post_min_score"]:
-        return  # includes hand-made clips (score 0): those wait for you to press Post
-    made = enqueue(job, clip, c["accounts"])
-    if made:
-        creators.log(c["id"], f"Queued for {len(made)} account(s): {clip.get('title') or clip.get('hook')}")
+    uid = job.get("user") or ctx.uid()
+    with ctx.as_user(uid):
+        c = creators.get(job["creator"])
+        if not c or not c["autopost"] or not c["accounts"]:
+            return
+        if clip.get("score", 0) < c["post_min_score"]:
+            return  # includes hand-made clips (score 0): those wait for you to press Post
+        made = enqueue(job, clip, c["accounts"])
+        if made:
+            creators.log(c["id"], f"Queued for {len(made)} account(s): {clip.get('title') or clip.get('hook')}")
 
 
 def _caption(clip, creator):
@@ -132,7 +206,8 @@ def _post(p):
 
 def _run():
     while True:
-        time.sleep(15)
+        _wake.wait(timeout=15)
+        _wake.clear()
         due = [p for p in list(_posts) if p["status"] == "scheduled" and p["due_at"] <= time.time() and p.get("user")]
         for p in due:
             try:
@@ -143,6 +218,8 @@ def _run():
                         if p["status"] != "scheduled":
                             continue
                         p["status"] = "posting"
+                        _save()
+                    _mirror(p)
                     _post(p)
             except Exception:  # noqa: BLE001
                 pass
@@ -194,6 +271,7 @@ def retry(pid):
         p.update(status="scheduled", due_at=time.time(), tries=0, error=None)
         _save()
     _mirror(p)
+    wake()
 
 
 def overview() -> dict:

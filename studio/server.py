@@ -1450,10 +1450,42 @@ def add_posts(body: dict = Body(...)):
     clip = next((c for c in job["clips"] if c["id"] == body.get("clip")), None) if job else None
     if not clip or clip.get("status") != "done":
         raise HTTPException(404, "That clip is not ready")
-    made = posting.enqueue(job, clip, [str(a) for a in body.get("accounts", [])][:20], now=bool(body.get("now")))
-    if not made:
-        raise HTTPException(400, "Nothing was queued. Pick at least one account this clip has not already gone to.")
-    return {"queued": len(made)}
+    account_ids = [str(a) for a in body.get("accounts", [])][:20]
+    if not account_ids:
+        raise HTTPException(400, "Tick at least one account first.")
+    res = posting.enqueue(job, clip, account_ids, now=bool(body.get("now")))
+    if res.made or res.expedited:
+        return {
+            "ok": True,
+            "queued": len(res.made),
+            "expedited": len(res.expedited),
+            "message": "Posting now" if bool(body.get("now")) else "Added to queue",
+        }
+    if res.already_uploading:
+        return {
+            "ok": True,
+            "queued": 0,
+            "already_uploading": len(res.already_uploading),
+            "message": "Upload already in progress",
+        }
+    if res.already_posted:
+        urls = [p.get("url") for p in res.already_posted if p.get("url")]
+        return {
+            "ok": True,
+            "queued": 0,
+            "already_posted": len(res.already_posted),
+            "urls": urls,
+            "url": urls[0] if urls else "",
+            "message": f"Already posted{f': {urls[0]}' if urls else ''}",
+        }
+    if res.already_scheduled:
+        return {
+            "ok": True,
+            "queued": 0,
+            "already_scheduled": len(res.already_scheduled),
+            "message": "Already scheduled in queue",
+        }
+    raise HTTPException(400, "None of the selected accounts could be found. Check your connected accounts in Settings.")
 
 
 @app.post("/api/posts/{pid}/{action}")
