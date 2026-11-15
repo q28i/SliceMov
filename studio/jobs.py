@@ -11,7 +11,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-from . import brain, config, creators, ctx, load, media, render, roman, safe, transcribe, usage
+from . import brain, clipping_profiles, config, creators, ctx, load, media, render, roman, safe, transcribe, usage
 
 class _FairQueue:
     """Whose video is next. Each person has their own line and the lines take turns, so someone who adds ten
@@ -108,7 +108,7 @@ _lock = threading.RLock()
 on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first finishes
 
 DEFAULTS = {"max_clips": 6, "min_len": 15, "max_len": 60, "style": "bounce", "layout": "blur", "quality": 720,
-            "range_start": None, "range_end": None}
+            "range_start": None, "range_end": None, "profile": "general"}
 
 
 LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080)}
@@ -127,6 +127,8 @@ def clean_options(options) -> dict:
             v = v if v in render.STYLES else DEFAULTS["style"]
         elif k == "layout":
             v = v if v in render.LAYOUTS else DEFAULTS["layout"]
+        elif k == "profile":
+            v = v if v in clipping_profiles.PROFILES else DEFAULTS["profile"]
         else:                                    # range_start, range_end: seconds into the video
             v = float(v)
             if not math.isfinite(v) or v < 0:
@@ -386,7 +388,11 @@ def render_one(job, clip, words):
                 pass
         # the last word on it: whatever was said, nothing is drawn in Hindi or Urdu script
         near = [dict(w, s=w["s"] - off, e=w["e"] - off) for w in roman.words(raw)]
-        out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
+        has_video = job.get("has_video", True)
+        if has_video:
+            out = render.render_clip(src, d / "clips", clip["id"], local, near, job.get("width", config.OUT_W), job.get("height", config.OUT_H))
+        else:
+            out = render.render_podcast_clip(src, d / "clips", clip["id"], local, near, job.get("title") or "Podcast", job.get("uploader") or "")
         clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None)
         post = {k: clip[k] for k in ("title", "description", "hashtags", "hook", "start", "end", "score")}
         (d / "clips" / f"{clip['id']}.json").write_text(json.dumps(post, indent=1), encoding="utf-8")
@@ -530,8 +536,9 @@ def _run_job(job):
         pieces, audio_file = False, Path(src["path"])
         info = media.probe(audio_file)
         if info["duration"] > config.MAX_VIDEO_HOURS * 3600:
-            raise RuntimeError(f"That video is longer than {config.MAX_VIDEO_HOURS:g} hours, which is the limit.")
-        _set(job, source_path=str(audio_file), width=info["width"], height=info["height"], duration=info["duration"])
+            raise RuntimeError(f"That file is longer than {config.MAX_VIDEO_HOURS:g} hours, which is the limit.")
+        _set(job, source_path=str(audio_file), width=info["width"], height=info["height"], duration=info["duration"],
+             has_video=info.get("has_video", True), has_audio=info.get("has_audio", True))
         if not job.get("thumb") and media.save_thumb(d, video=audio_file):
             _set(job, thumb=True)
     wav = d / "audio.wav"
@@ -664,7 +671,8 @@ def _run_job(job):
         quota = max(1, math.ceil(left / (len(blocks) - bi)))
         s0 = int((a - lo) / 16000)
         found, ai = brain.find_clips(bw, db[s0: s0 + int((b - a) / 16000) + 1], (b - a) / 16000, job["title"],
-                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]), notes.append)
+                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]),
+                                     profile=o.get("profile") or "general", log=notes.append)
         tokens += ai.get("tokens", 0)
         model = ai.get("model") or model
         if ai.get("note"):

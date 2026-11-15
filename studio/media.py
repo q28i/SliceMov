@@ -67,13 +67,16 @@ def _youtube_guard(url):
 
 
 def site_allowed(url: str) -> bool:
-    """Links are fetched by the server, so only known video sites are accepted (never arbitrary addresses)."""
+    """Links are fetched by the server: accepted video sites, or direct audio/podcast files (.mp3, .m4a, .wav)."""
     from urllib.parse import urlparse
     try:
         u = urlparse(url.strip())
     except ValueError:
         return False
     host = (u.hostname or "").lower()
+    path = (u.path or "").lower()
+    if u.scheme in ("http", "https") and any(path.endswith(ext) for ext in (".mp3", ".m4a", ".wav", ".aac", ".ogg")):
+        return True
     return u.scheme in ("http", "https") and any(host == s or host.endswith("." + s) for s in config.ALLOWED_SITES)
 
 
@@ -221,7 +224,7 @@ def preview(url: str) -> dict:
 
 
 def save_thumb(job_dir: Path, url: str = "", video: Path = None) -> bool:
-    """A small picture for the video list: the link's own thumbnail, or a frame from an uploaded file."""
+    """A small picture for the video list: the link's own thumbnail, a frame from an uploaded file, or a podcast card."""
     import base64
     out = Path(job_dir) / "clips" / "thumb.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -233,10 +236,34 @@ def save_thumb(job_dir: Path, url: str = "", video: Path = None) -> bool:
             out.write_bytes(base64.b64decode(p["thumb"].split(",", 1)[1]))
             return True
         if video:
-            d = probe(video).get("duration") or 0
-            run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{min(3.0, d / 3):.2f}", "-i", str(video),
-                 "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "4", str(out)])
-            return out.is_file()
+            info = probe(video)
+            d = info.get("duration") or 0
+            if info.get("has_video"):
+                run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{min(3.0, d / 3):.2f}", "-i", str(video),
+                     "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "4", str(out)])
+                return out.is_file()
+            else:
+                # Audio-only podcast: try to extract embedded artwork or generate an audio cover card
+                try:
+                    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-an", "-vcodec", "copy", str(out)])
+                    if out.is_file() and out.stat().st_size > 500:
+                        return True
+                except Exception:
+                    pass
+                # Generate clean visual podcast badge
+                try:
+                    from PIL import Image, ImageDraw
+                    img = Image.new("RGB", (480, 480), color=(24, 28, 36))
+                    draw = ImageDraw.Draw(img)
+                    draw.rectangle([20, 20, 460, 460], outline=(48, 54, 70), width=2)
+                    draw.rectangle([40, 40, 440, 200], fill=(36, 42, 54))
+                    draw.text((240, 120), "AUDIO PODCAST", fill=(107, 215, 255), anchor="mm")
+                    title_stem = video.stem.replace("_", " ")[:30]
+                    draw.text((240, 300), title_stem, fill=(240, 240, 240), anchor="mm")
+                    img.save(str(out), "JPEG", quality=85)
+                    return out.is_file()
+                except Exception:
+                    return False
     except Exception:
         return False
     return False
@@ -290,18 +317,31 @@ def find_offset(full: np.ndarray, part: np.ndarray, expected: float, search=20.0
 def probe(path: Path) -> dict:
     out = run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)])
     data = json.loads(out)
-    v = next((s for s in data["streams"] if s["codec_type"] == "video"), None)
-    if not v:
-        raise RuntimeError("This file has no video track.")
-    if not any(s["codec_type"] == "audio" for s in data["streams"]):
+    streams = data.get("streams", [])
+    v = next((s for s in streams if s.get("codec_type") == "video"), None)
+    a = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if not a:
         raise RuntimeError("This file has no audio track, so there is nothing to transcribe.")
-    w, h = int(v["width"]), int(v["height"])
-    if w * h > 3840 * 2160 or w < 16 or h < 16:
-        raise RuntimeError("This video's resolution isn't supported (4K is the largest).")
-    rot = str((v.get("side_data_list") or [{}])[0].get("rotation", "0"))
-    if rot.lstrip("-") in ("90", "270"):
-        w, h = h, w
-    return {"width": w, "height": h, "duration": float(data["format"]["duration"])}
+    duration = 0.0
+    if "duration" in data.get("format", {}):
+        try:
+            duration = float(data["format"]["duration"])
+        except (ValueError, TypeError):
+            pass
+    if not duration and a and "duration" in a:
+        try:
+            duration = float(a["duration"])
+        except (ValueError, TypeError):
+            pass
+    if v:
+        w, h = int(v.get("width", 1080)), int(v.get("height", 1920))
+        if w * h > 3840 * 2160 or w < 16 or h < 16:
+            raise RuntimeError("This video's resolution isn't supported (4K is the largest).")
+        rot = str((v.get("side_data_list") or [{}])[0].get("rotation", "0"))
+        if rot.lstrip("-") in ("90", "270"):
+            w, h = h, w
+        return {"width": w, "height": h, "duration": duration, "has_video": True, "has_audio": True}
+    return {"width": config.OUT_W, "height": config.OUT_H, "duration": duration, "has_video": False, "has_audio": True}
 
 
 def extract_audio(src: Path, wav: Path):

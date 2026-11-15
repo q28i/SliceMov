@@ -39,7 +39,9 @@ WEB = config.ROOT / "web"
 OPEN = ("/api/auth/", "/pub/", "/api/public", "/auth/google/", "/auth/verify", "/brand/", "/assets/", "/healthz", "/favicon.ico", "/robots.txt", "/sitemap.xml")
 PAGES = {"/": "landing.html", "/login": "auth.html", "/signup": "auth.html", "/reset": "reset.html",
          "/privacy": "legal.html", "/terms": "legal.html", "/acceptable-use": "legal.html"}
-VIDEO_TYPES = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".ts", ".flv"}
+MEDIA_TYPES = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".ts", ".flv", ".mp3", ".wav", ".m4a", ".aac", ".ogg"}
+VIDEO_TYPES = MEDIA_TYPES
+AUDIO_TYPES = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
 CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; "
        "frame-src https://player.twitch.tv https://www.youtube-nocookie.com https://player.kick.com; "
@@ -568,13 +570,21 @@ def google_callback(request: Request, code: str = "", state: str = "", error: st
 # ================================================================ app status
 @app.get("/api/status")
 def status(request: Request):
+    from . import clipping_profiles
     from . import notices
     from . import updates
     me_ = _me(request)
     return {"user": auth.public(me_), "update": updates.latest() if me_.is_admin else None, "accounts": config.ACCOUNTS, "disk_full": load.disk_full(), "no_ffmpeg": bool(_tools.missing()), "links": {"repo": config.REPO_URL, "follow": config.FOLLOW_URL}, "ai": usage.brief(), "unread": notices.unread(),
             "tour": not accounts.settings()["tour_done"],
             "youtube": accounts.youtube_ready(), "connect": {p: accounts.can_connect(p) for p in accounts.PLATFORM_NAMES}, "max_upload_mb": config.MAX_UPLOAD_MB, "upload_part_mb": config.UPLOAD_PART_MB, "max_batch": config.MAX_ACTIVE_JOBS_PER_USER,
-            "styles": {k: v["label"] for k, v in render.STYLES.items()}, "layouts": render.LAYOUTS}
+            "styles": {k: v["label"] for k, v in render.STYLES.items()}, "layouts": render.LAYOUTS,
+            "profiles": clipping_profiles.list_profiles()}
+
+
+@app.get("/api/profiles")
+def get_clipping_profiles():
+    from . import clipping_profiles
+    return clipping_profiles.list_profiles()
 
 
 # ================================================================ videos
@@ -703,6 +713,49 @@ def link_preview(request: Request, url: str = ""):
         raise HTTPException(422, "Couldn't open that video. Check the link is public and complete.")
 
 
+@app.get("/api/rss/preview")
+def rss_preview(request: Request, url: str = ""):
+    from . import rss
+    url = url.strip()[:600]
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "Enter a valid podcast RSS feed URL (starting with http:// or https://).")
+    try:
+        auth.throttle(f"rss:{_me(request).id}", 10, 60)
+    except auth.AuthError:
+        raise HTTPException(429, "Too many feed requests at once. Wait a moment.")
+    try:
+        return rss.parse_podcast_feed(url)
+    except Exception as e:
+        raise HTTPException(422, f"Could not read podcast RSS feed: {e}")
+
+
+@app.post("/api/rss/import")
+def rss_import(body: dict = Body(...)):
+    _need_verified()
+    _quota()
+    _throttle("newjob:" + ctx.uid(), 30, 600)
+    audio_url = str(body.get("audio_url") or body.get("episode_url") or "").strip()[:1000]
+    if not audio_url.startswith(("http://", "https://")):
+        raise HTTPException(400, "Invalid episode audio URL.")
+    title = str(body.get("title", "")).strip()[:200] or "Podcast Episode"
+    author = str(body.get("author", "")).strip()[:120]
+    creator = str(body.get("creator") or "") or None
+    if creator and not creators.get(creator):
+        raise HTTPException(404, "No such creator")
+    options = body.get("options")
+    opts = options if isinstance(options, dict) else {}
+    opts.setdefault("profile", "podcast")
+    try:
+        source = {"type": "url", "url": audio_url, "name": title, "source_type": "rss_podcast",
+                  "uploader": author, "rights_status": "podcast_feed"}
+        job = jobs.create(source, opts, creator=creator)
+        job.update(title=title, uploader=author, has_video=False, has_audio=True)
+        jobs.save(job)
+        return jobs.public(job)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/jobs")
 def create_from_link(body: dict = Body(...)):
     _need_verified()
@@ -739,8 +792,8 @@ def create_from_file(file: UploadFile = File(...), options: str = Form("{}"), cr
     _job_slots()
     name = re.sub(r"[^\w.\- ]", "_", Path(file.filename or "video.mp4").name)[:120]
     ext = Path(name).suffix.lower()
-    if ext not in VIDEO_TYPES:
-        raise HTTPException(400, "Upload a video file (mp4, mov, mkv or webm).")
+    if ext not in MEDIA_TYPES:
+        raise HTTPException(400, "Upload a video or audio file (mp4, mov, mkv, mp3, wav, m4a or webm).")
     if creator and not creators.get(creator):
         raise HTTPException(404, "No such creator")
     try:
@@ -820,8 +873,8 @@ def upload_start(body: dict = Body(...)):
     _throttle("upstart:" + ctx.uid(), 30, 600)
     name = re.sub(r"[^\w.\- ]", "_", Path(str(body.get("name") or "video.mp4")).name)[:120]
     ext = Path(name).suffix.lower()
-    if ext not in VIDEO_TYPES:
-        raise HTTPException(400, "Upload a video file (mp4, mov, mkv or webm).")
+    if ext not in MEDIA_TYPES:
+        raise HTTPException(400, "Upload a video or audio file (mp4, mov, mkv, mp3, wav, m4a or webm).")
     size = body.get("size")
     if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
         raise HTTPException(400, "Bad file size.")
@@ -1491,12 +1544,12 @@ def add_posts(body: dict = Body(...)):
 @app.post("/api/posts/{pid}/{action}")
 def post_action(pid: str, action: str):
     try:
-        {"cancel": posting.cancel, "retry": posting.retry}[action](pid)
+        r = {"cancel": posting.cancel, "retry": posting.retry, "reconcile": posting.reconcile}[action](pid)
+        return r if isinstance(r, dict) else {"ok": True}
     except KeyError:
         raise HTTPException(404)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"ok": True}
 
 
 @app.post("/api/alerts/test")

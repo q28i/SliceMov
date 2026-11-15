@@ -894,6 +894,7 @@ const I = {
  "signout": "<path d=\"M120,216a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V40a8,8,0,0,1,8-8h64a8,8,0,0,1,0,16H56V208h56A8,8,0,0,1,120,216Zm109.66-93.66-40-40a8,8,0,0,0-11.32,11.32L204.69,120H112a8,8,0,0,0,0,16h92.69l-26.35,26.34a8,8,0,0,0,11.32,11.32l40-40A8,8,0,0,0,229.66,122.34Z\"/>",
  "shield": "<path d=\"M208,40H48A16,16,0,0,0,32,56v56c0,52.72,25.52,84.67,46.93,102.19,23.06,18.86,46,25.26,47,25.53a8,8,0,0,0,4.2,0c1-.27,23.91-6.67,47-25.53C198.48,196.67,224,164.72,224,112V56A16,16,0,0,0,208,40Zm0,72c0,37.07-13.66,67.16-40.6,89.42A129.3,129.3,0,0,1,128,223.62a128.25,128.25,0,0,1-38.92-21.81C61.82,179.51,48,149.3,48,112l0-56,160,0ZM82.34,141.66a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35a8,8,0,0,1,11.32,11.32l-56,56a8,8,0,0,1-11.32,0Z\"/>",
  "users": "<path d=\"M117.25,157.92a60,60,0,1,0-66.5,0A95.83,95.83,0,0,0,3.53,195.63a8,8,0,1,0,13.4,8.74,80,80,0,0,1,134.14,0,8,8,0,0,0,13.4-8.74A95.83,95.83,0,0,0,117.25,157.92ZM40,108a44,44,0,1,1,44,44A44.05,44.05,0,0,1,40,108Zm210.14,98.7a8,8,0,0,1-11.07-2.33A79.83,79.83,0,0,0,172,168a8,8,0,0,1,0-16,44,44,0,1,0-16.34-84.87,8,8,0,1,1-5.94-14.85,60,60,0,0,1,55.53,105.64,95.83,95.83,0,0,1,47.22,37.71A8,8,0,0,1,250.14,206.7Z\"/>",
+ "rss": "<path d=\"M48,208a16,16,0,1,0-16-16A16,16,0,0,0,48,208Zm0-80A88.1,88.1,0,0,1,136,216a8,8,0,0,0,16,0A104.12,104.12,0,0,0,48,112a8,8,0,0,0,0,16Zm0-64A152.17,152.17,0,0,1,200,216a8,8,0,0,0,16,0A168.19,168.19,0,0,0,48,48a8,8,0,0,0,0,16Z\"/>",
  "lock": "<path d=\"M128,112a28,28,0,0,0-8,54.83V184a8,8,0,0,0,16,0V166.83A28,28,0,0,0,128,112Zm0,40a12,12,0,1,1,12-12A12,12,0,0,1,128,152Zm80-72H176V56a48,48,0,0,0-96,0V80H48A16,16,0,0,0,32,96V208a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V96A16,16,0,0,0,208,80ZM96,56a32,32,0,0,1,64,0V80H96ZM208,208H48V96H208V208Z\"/>"
 };
 const ic = n => `<svg viewBox="0 0 256 256" aria-hidden="true">${I[n]}</svg>`;
@@ -1357,16 +1358,25 @@ function setTab(t) {
 function drawAdd(variant) {
   const c = creator();
   $("#add").innerHTML = `<form class="composer ${variant === "hero" ? "big" : "compact"}" id="addform">
-    <div class="composer-input">${ic("link")}<input id="url" placeholder="Paste a YouTube, Twitch or Kick video link" autocomplete="off" aria-label="Video link"></div>
+    <div class="composer-input">${ic("link")}<input id="url" placeholder="Paste YouTube, Twitch, Kick link, or audio podcast URL" autocomplete="off" aria-label="Media link"></div>
     <div class="att" id="att"><div><div class="att-in" id="attIn"></div></div></div>
     <div class="composer-bar">
-      <button type="button" class="chip" data-act="pickfile">${ic("up")}Upload video</button>
+      <button type="button" class="chip" data-act="pickfile">${ic("up")}Upload media (Video/Audio)</button>
+      <button type="button" class="chip" data-act="importrss">${ic("rss") || ic("link")}Podcast RSS</button>
       ${c ? "" : picker("o_creator", "File under creator", [{v:"", label:"No creator", icon:"user"}, ...S.creators.map(x => ({v:x.id, label:x.name, img:x.profile?.pic && x.profile.channel === x.channel ? avatarUrl(x) : ""}))], "")}
       <button type="button" class="chip" data-act="toggleopts" aria-expanded="false">${ic("sliders")}Options</button>
-      <span class="grow"></span><span class="hint">or drop a video file here</span>
+      <span class="grow"></span><span class="hint">or drop media files here</span>
       <button class="btn primary" id="goBtn">${ic("scissors")}Make clips</button>
     </div>
     <div class="composer-opts" inert><div class="og">
+      <div class="ob wide"><div class="ot">Clipping profile</div>${choice("o_profile", (S.status.profiles || [
+        {id:"general", label:"General Video"},
+        {id:"livestream", label:"Livestream"},
+        {id:"podcast", label:"Podcast & Discussion"},
+        {id:"gaming", label:"Gaming Highlights"},
+        {id:"interview", label:"Interview & Q&A"},
+        {id:"educational", label:"Educational & Explainer"}
+      ]).map(p => ({v:p.id, label:p.label, title:p.description || p.label, prev:`<span style="font-size:11px;opacity:0.7">● </span>`})), c?.profile ?? "general")}</div>
       <div class="ob wide"><div class="ot">Clips</div><div class="nsteps">
         ${stepper("o_max", "How many", c?.max_clips ?? 6, 1, 20, 1, "")}
         ${stepper("o_min", "Shortest", c?.min_len ?? 15, 5, 120, 5, "s")}
@@ -1383,8 +1393,18 @@ function drawAdd(variant) {
     </div></div></form>`;
   drawAtt();
 }
-const LAYOUT_SHORT = {blur:"Blurred fill", zoom:"Zoomed in", crop:"Fill screen"};
-const CAP_LOOK = {bounce:{font:"'Archivo Black'", hl:"#FFFF00", up:true}, hype:{font:"Anton", hl:"#FF3C3C", up:true}, clean:{font:"Poppins", hl:"#6BD7FF", up:false, w:800}};
+const LAYOUT_SHORT = {blur:"Blurred fill", zoom:"Zoomed in", crop:"Fill screen", original:"Original aspect", square:"Square (1:1)"};
+const CAP_LOOK = {
+  bounce:{font:"'Archivo Black'", hl:"#FFFF00", up:true},
+  hype:{font:"Anton", hl:"#FF3C3C", up:true},
+  clean:{font:"Poppins", hl:"#6BD7FF", up:false, w:800},
+  streamer_bold:{font:"'Montserrat'", hl:"#00FFCC", up:true, w:900},
+  karaoke:{font:"'Rubik'", hl:"#FF0055", up:true, w:800},
+  gaming_hype:{font:"'Impact'", hl:"#FFAA00", up:true, w:800},
+  clean_podcast:{font:"'Inter'", hl:"#FFFFFF", up:false, w:600},
+  minimal:{font:"'Helvetica Neue'", hl:"#E0E0E0", up:false, w:500},
+  high_contrast:{font:"'Arial Black'", hl:"#FFFF00", up:true, w:900}
+};
 function capPrev(k) {
   const s = CAP_LOOK[k] || {font:"inherit", hl:"#FF8B33", up:true};
   const t = s.up ? ["CLIP", "THIS"] : ["Clip", "this"];
@@ -1438,7 +1458,7 @@ document.addEventListener("keydown", e => {
 const targetCreator = () => creatorId() || $("#o_creator")?.value || "";
 function jobOptions() {
   const n = id => { const v = $(id).value; return v === "" ? null : Number(v); };
-  const o = {max_clips:n("#o_max"), min_len:n("#o_min"), max_len:n("#o_maxlen"), style:$("#o_style").value, layout:$("#o_layout").value, quality:n("#o_quality")};
+  const o = {profile:$("#o_profile")?.value || "general", max_clips:n("#o_max"), min_len:n("#o_min"), max_len:n("#o_maxlen"), style:$("#o_style").value, layout:$("#o_layout").value, quality:n("#o_quality")};
   if (n("#o_from") !== null) o.range_start = n("#o_from") * 60;
   if (n("#o_to") !== null) o.range_end = n("#o_to") * 60;
   return o;
@@ -1726,10 +1746,16 @@ function jobHtml(j) {
   if (j.status === "live") return liveHtml(j);
   const busy = j.status === "queued" || j.status === "running";
   const who = !creatorId() && j.creator ? S.creators.find(c => c.id === j.creator)?.name : "";
+  const profMap = {livestream:"Livestream", podcast:"Podcast", gaming:"Gaming", interview:"Interview", educational:"Educational", general:"General"};
+  const profLabel = profMap[j.options?.profile || j.profile] || "";
+  const badges = [
+    j.has_video === false ? `<span class="pill" style="font-size:11px;padding:2px 8px;font-weight:600">Audio Podcast</span>` : "",
+    profLabel ? `<span class="pill" style="font-size:11px;padding:2px 8px;font-weight:600">${esc(profLabel)}</span>` : ""
+  ].filter(Boolean).join(" ");
   const meta = [who, j.uploader, j.duration ? fmt(j.duration) + " long" : "", j.clips.length ? j.clips.length + (j.clips.length === 1 ? " clip" : " clips") : "",
                 j.took ? "made in " + fmt(j.took) : "", j.kind === "live" ? "recording, " + j.stage.toLowerCase() : ""].filter(Boolean).map(esc).join(" · ");
   const pic = j.thumb ? `<img src="/media/${esc(j.id)}/thumb.jpg" alt="" loading="lazy">` : ic(j.source?.type === "file" ? "film" : "link");
-  return `<div class="job-head"><div class="jt"><span class="jthumb">${pic}${j.duration ? `<span class="du">${fmt(j.duration)}</span>` : ""}</span><div style="min-width:0"><h3>${esc(j.title || j.source.name)}</h3><p class="sub">${meta}</p></div></div>
+  return `<div class="job-head"><div class="jt"><span class="jthumb">${pic}${j.duration ? `<span class="du">${fmt(j.duration)}</span>` : ""}</span><div style="min-width:0"><h3>${esc(j.title || j.source.name)}</h3><p class="sub">${badges ? badges + " · " : ""}${meta}</p></div></div>
       <div class="row" style="flex-wrap:nowrap;gap:4px">${busy ? "" : `
         ${j.clips.some(c => c.status === "done") ? `<button class="btn sm icon ghost" data-act="dlall" data-j="${j.id}" title="Download all clips of this video" aria-label="Download all clips of this video">${ic("down")}</button>` : ""}
         <button class="btn sm icon ghost" data-act="deljob" data-j="${j.id}" title="Delete" aria-label="Delete this video and its clips">${ic("trash")}</button>
@@ -1765,6 +1791,7 @@ function drawSelBar() {
   put(bar, `<b>${n} selected</b>
     <button class="btn sm" data-act="selall">Select all</button>
     <button class="btn sm primary" data-act="seldl" ${dl ? "" : "disabled"}>${ic("down")}Download${dl ? ` ${dl} clip${dl === 1 ? "" : "s"}` : ""}</button>
+    <button class="btn sm" data-act="selpost" ${dl ? "" : "disabled"}>${ic("send")}Publish selected</button>
     <button class="btn sm danger" data-act="seldel">${ic("trash")}Delete</button>
     <button class="btn sm" data-act="selclear">Cancel</button>`);
 }
@@ -2157,6 +2184,7 @@ function postControlsHtml(c) {
       rows.push(`<div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
         <span class="pill bad" title="${esc(p.error || '')}">${esc(a.name)} · Failed</span>
         <button class="btn sm" data-act="pretry" data-id="${esc(p.id)}">Retry</button>
+        <button class="btn sm ghost" data-act="preconcile" data-id="${esc(p.id)}" title="Check remote status before retrying">Reconcile</button>
       </div>`);
     } else {
       availableAccs.push({account: a, cancelled: status === "cancelled"});
@@ -2482,6 +2510,141 @@ document.addEventListener("click", async e => {
       if (D.jid) drawClipDlg(false);
       if (S.view === "overview") loadOverview();
       return;
+    }
+    if (a === "preconcile") {
+      b.disabled = true;
+      try {
+        const r = await api(`/api/posts/${d.id}/reconcile`, {method:"POST"});
+        toast(`Post status: ${r.status}` + (r.url ? ` (${r.url})` : ""), "ok");
+        await tick();
+        if (D.jid) drawClipDlg(false);
+        if (S.view === "overview") loadOverview();
+      } catch (err) { toast(err.message, "bad"); }
+      finally { b.disabled = false; }
+      return;
+    }
+    if (a === "importrss") {
+      const dlg = $("#formdlg");
+      dlg.innerHTML = `<form method="dialog" class="dlg" style="max-width:540px">
+        <h2>Import podcast episode</h2>
+        <p class="help">Enter an RSS podcast feed URL to preview and import episodes for automatic clipping.</p>
+        <div class="row" style="gap:8px;align-items:flex-end">
+          <label class="f" style="flex:1;margin:0">Feed URL<input id="rss_url" placeholder="https://anchor.fm/s/.../podcast.rss" autofocus required></label>
+          <button type="button" class="btn primary" id="rss_fetch_btn">Preview feed</button>
+        </div>
+        <div id="rss_episodes" style="max-height:260px;overflow-y:auto;margin-top:12px"></div>
+        <div class="dlg-foot">
+          <button class="btn" value="no" formnovalidate>Cancel</button>
+          <button class="btn primary" value="yes" id="rss_import_btn" disabled>Import episode</button>
+        </div>
+      </form>`;
+      let selectedEpisode = null;
+      let feedData = null;
+      const fetchBtn = $("#rss_fetch_btn"), epBox = $("#rss_episodes"), importBtn = $("#rss_import_btn");
+      fetchBtn.addEventListener("click", async () => {
+        const u = $("#rss_url").value.trim();
+        if (!u) return toast("Enter an RSS feed URL first", "bad");
+        fetchBtn.disabled = true;
+        fetchBtn.textContent = "Loading…";
+        epBox.innerHTML = `<p class="help">Fetching and parsing feed…</p>`;
+        try {
+          const data = await api("/api/rss/preview?url=" + encodeURIComponent(u));
+          feedData = data;
+          if (!data.episodes || !data.episodes.length) {
+            epBox.innerHTML = `<p class="help">No audio episodes found in this feed.</p>`;
+            return;
+          }
+          epBox.innerHTML = `<div style="font-weight:600;margin-bottom:8px">${esc(data.title)} (${data.episodes.length} episodes)</div>` +
+            data.episodes.slice(0, 30).map((ep, idx) => `
+              <label class="row" style="gap:8px;padding:6px;border-bottom:1px solid var(--line);cursor:pointer;align-items:center">
+                <input type="radio" name="rss_ep" value="${idx}" ${idx === 0 ? "checked" : ""}>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(ep.title)}</div>
+                  <div class="sub" style="font-size:11px">${esc(ep.pub_date || "")}${ep.duration ? " · " + fmt(ep.duration) : ""}</div>
+                </div>
+              </label>
+            `).join("");
+          selectedEpisode = data.episodes[0];
+          importBtn.disabled = false;
+          epBox.querySelectorAll("input[name=rss_ep]").forEach(radio => {
+            radio.addEventListener("change", e => {
+              selectedEpisode = data.episodes[Number(e.target.value)];
+            });
+          });
+        } catch (err) {
+          epBox.innerHTML = `<div class="err">${esc(err.message)}</div>`;
+        } finally {
+          fetchBtn.disabled = false;
+          fetchBtn.textContent = "Preview feed";
+        }
+      });
+      dlg.onclose = async () => {
+        if (dlg.returnValue !== "yes" || !selectedEpisode) return;
+        try {
+          toast("Starting podcast import…", "ok");
+          const r = await send("/api/rss/import", {
+            feed_url: $("#rss_url").value.trim(),
+            episode_url: selectedEpisode.enclosure_url,
+            creator: targetCreator(),
+            profile: "podcast"
+          });
+          toast("Podcast episode queued for clipping!", "ok");
+          await tick();
+        } catch (err) {
+          toast(err.message, "bad");
+        }
+      };
+      dlg.returnValue = "no";
+      return dlg.showModal();
+    }
+    if (a === "selpost") {
+      const clips = selClips();
+      if (!clips.length) return toast("No finished clips selected to publish.", "bad");
+      if (!S.accounts.length) return toast("No connected social accounts. Connect one in Settings.", "bad");
+      const dlg = $("#formdlg");
+      dlg.innerHTML = `<form method="dialog" class="dlg" style="max-width:480px">
+        <h2>Publish ${clips.length} clip${clips.length > 1 ? "s" : ""}</h2>
+        <p class="help">Choose which destination accounts to publish all ${clips.length} selected clips to:</p>
+        <div style="margin:12px 0;display:flex;flex-direction:column;gap:8px">
+          ${S.accounts.map(acc => `
+            <label class="ck" style="font-size:13px">
+              <input type="checkbox" name="bulk_acc" value="${esc(acc.id)}" checked>
+              <b>${esc(acc.name)}</b> <span class="sub">(${esc(acc.label || acc.platform)})</span>
+            </label>
+          `).join("")}
+        </div>
+        <div class="row" style="gap:12px;margin-bottom:12px">
+          <label><input type="radio" name="bulk_timing" value="queue" checked> Add to schedule queue</label>
+          <label><input type="radio" name="bulk_timing" value="now"> Post now</label>
+        </div>
+        <div class="dlg-foot">
+          <button class="btn" value="no" formnovalidate>Cancel</button>
+          <button class="btn primary" value="yes">Publish</button>
+        </div>
+      </form>`;
+      dlg.onclose = async () => {
+        if (dlg.returnValue !== "yes") return;
+        const checkedAccs = $$("#formdlg input[name=bulk_acc]:checked").map(i => i.value);
+        if (!checkedAccs.length) return toast("No accounts selected.", "bad");
+        const postNow = $("#formdlg input[name=bulk_timing]:checked")?.value === "now";
+        toast(`Publishing ${clips.length} clips to ${checkedAccs.length} account${checkedAccs.length > 1 ? "s" : ""}…`, "ok");
+        let count = 0;
+        for (const item of clips) {
+          const [jid, cid] = item.split(".");
+          try {
+            await send("/api/posts", {job: jid, clip: cid, accounts: checkedAccs, now: postNow});
+            count++;
+          } catch (e) {
+            console.error("Bulk post error on", item, e);
+          }
+        }
+        sel().clear();
+        await tick();
+        render();
+        toast(`Done: ${count} clip${count > 1 ? "s" : ""} ${postNow ? "posted" : "queued"} across selected accounts.`, "ok");
+      };
+      dlg.returnValue = "no";
+      return dlg.showModal();
     }
     if (a === "publishnow") {
       if (!await ask("Publish now?", "This clip's existing schedule will be replaced with immediate publication.", "Publish now")) return;

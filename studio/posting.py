@@ -274,6 +274,41 @@ def retry(pid):
     wake()
 
 
+def reconcile(pid):
+    """Check whether a post in an uncertain or failed state actually succeeded on the remote platform."""
+    with _lock:
+        p = next((p for p in _mine() if p["id"] == pid), None)
+        if not p:
+            raise ValueError("No such post found.")
+        acc = accounts.get(p["account"])
+        if not acc:
+            raise ValueError("The connected account for this post was removed.")
+        rid = p.get("remote_id")
+        if rid:
+            try:
+                if p["platform"] == "youtube":
+                    views = accounts.youtube_views(acc, [rid])
+                    if rid in views:
+                        p.update(status="posted", error=None, url=p.get("url") or f"https://youtube.com/shorts/{rid}")
+                        _save()
+                        _mirror(p)
+                        return {"reconciled": True, "status": "posted", "url": p["url"]}
+                elif p["platform"] == "instagram":
+                    v = accounts.instagram_views(acc, rid)
+                    if v is not None:
+                        p.update(status="posted", error=None)
+                        _save()
+                        _mirror(p)
+                        return {"reconciled": True, "status": "posted", "url": p.get("url", "")}
+            except Exception:
+                pass
+        p.update(status="scheduled", due_at=time.time(), tries=0, error=None)
+        _save()
+    _mirror(p)
+    wake()
+    return {"reconciled": False, "status": "scheduled", "message": "Post safely rescheduled for immediate retry."}
+
+
 def overview() -> dict:
     today = _day(time.time())
     _posts = _mine()  # everything below is about the signed-in user only

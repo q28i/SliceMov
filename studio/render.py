@@ -12,12 +12,26 @@ W, H = config.OUT_W, config.OUT_H
 
 # ASS colours are &HBBGGRR. `size` is the ASS font size (line height); _Font turns it into real pixels.
 STYLES = {
+    # Original PeakCut styles
     "bounce": {"label": "Bounce", "font": "Poppins ExtraBold", "size": 132, "base": "FFFFFF", "active": "00F0FF",
                "strong": "FFFFFF", "outline": 7, "pop": 112, "upper": True, "per": 3},
     "hype": {"label": "Hype", "font": "Anton", "size": 152, "base": "FFFFFF", "active": "3C3CFF",
              "strong": "00D7FF", "outline": 7, "pop": 114, "upper": True, "per": 2},
     "clean": {"label": "Clean", "font": "Poppins ExtraBold", "size": 100, "base": "FFFFFF", "active": "6BD7FF",
               "strong": "FFFFFF", "outline": 5, "pop": 106, "upper": False, "per": 4},
+    # Enhanced Presets
+    "streamer_bold": {"label": "Streamer Bold", "font": "Archivo Black", "size": 138, "base": "FFFFFF", "active": "00F0FF",
+                      "strong": "FFCC00", "outline": 8, "pop": 115, "upper": True, "per": 2},
+    "karaoke": {"label": "Karaoke", "font": "Poppins ExtraBold", "size": 116, "base": "CCCCCC", "active": "00E5FF",
+                "strong": "FFFFFF", "outline": 6, "pop": 108, "upper": False, "per": 3},
+    "gaming_hype": {"label": "Gaming Hype", "font": "Anton", "size": 156, "base": "FFFFFF", "active": "1E28FF",
+                    "strong": "00F2FF", "outline": 8, "pop": 118, "upper": True, "per": 2},
+    "clean_podcast": {"label": "Clean Podcast", "font": "Poppins ExtraBold", "size": 94, "base": "F0F0F0", "active": "5ED0FF",
+                      "strong": "FFFFFF", "outline": 4, "pop": 104, "upper": False, "per": 4},
+    "minimal": {"label": "Minimal", "font": "Poppins ExtraBold", "size": 88, "base": "E0E0E0", "active": "FFFFFF",
+                "strong": "FFFFFF", "outline": 3, "pop": 102, "upper": False, "per": 4},
+    "high_contrast": {"label": "High Contrast", "font": "Archivo Black", "size": 128, "base": "FFFFFF", "active": "00F6FF",
+                      "strong": "FFFF00", "outline": 10, "pop": 110, "upper": True, "per": 2},
 }
 HOOK = {"font": "Poppins ExtraBold", "size": 96, "ink": "14100E", "box": "FFFFFF", "pad_x": 36, "pad_y": 22, "radius": 26,
         "max_w": 900}
@@ -78,7 +92,13 @@ def install_fonts():
             shutil.copyfile(f, config.FONTS_DIR / f.name)
 
 
-LAYOUTS = {"blur": "Full frame + blurred fill", "zoom": "Zoomed in + blurred fill", "crop": "Fill the screen (centre crop)"}
+LAYOUTS = {
+    "blur": "Vertical 9:16 (Full frame + blurred fill)",
+    "zoom": "Vertical 9:16 (Zoomed in + blurred fill)",
+    "crop": "Fill the screen (centre crop)",
+    "original": "Original aspect ratio (No crop or fill)",
+    "square": "Square 1:1 (Centre framed)",
+}
 
 
 def _ts(t):
@@ -109,9 +129,13 @@ def _groups(words, per):
 
 
 def geometry(src_w, src_h, layout):
-    """Where the video sits in the 1080x1920 frame, and where hook and captions go."""
-    if src_h >= src_w and layout != "crop":
-        layout = "crop"  # already vertical or square: nothing to gain from a blurred fill
+    """Where the video sits in the frame, and where hook and captions go."""
+    if layout == "original":
+        return "original", src_h, int(src_h * 0.18), int(src_h * 0.80)
+    if layout == "square":
+        return "square", W, 180, 880
+    if src_h >= src_w and layout not in ("crop", "square", "original"):
+        layout = "crop"  # already vertical: nothing to gain from a blurred fill
     if layout == "blur":
         fg_h = min(H, int(round(W * src_h / src_w / 2)) * 2)
     elif layout == "zoom":
@@ -230,6 +254,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 def _filter(layout, fg_h):
     if layout == "crop":
         return f"[0:v]fps={config.OUT_FPS},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1[v0];"
+    if layout == "original":
+        return f"[0:v]fps={config.OUT_FPS},setsar=1[v0];"
+    if layout == "square":
+        return (f"[0:v]fps={config.OUT_FPS},split=2[a][b];"
+                f"[a]scale=270:270:force_original_aspect_ratio=increase,crop=270:270,boxblur=6:2,"
+                f"scale={W}:{W},eq=brightness=-0.14:saturation=1.15[bg];"
+                f"[b]scale={W}:{W}:force_original_aspect_ratio=decrease[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v0];")
     return (f"[0:v]fps={config.OUT_FPS},split=2[a][b];"
             f"[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=6:2,"
             f"scale={W}:{H},eq=brightness=-0.14:saturation=1.15[bg];"
@@ -238,6 +270,7 @@ def _filter(layout, fg_h):
 
 
 _qsv_ok = None
+_nvenc_ok = None
 RENDER_SECONDS = 600      # one clip's video encode; far beyond normal, so a frozen encoder is stopped, not waited on
 
 
@@ -260,7 +293,7 @@ def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, sr
 
 
 def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str) -> dict:
-    global _qsv_ok
+    global _qsv_ok, _nvenc_ok
     (work / f"{name}.ass").write_text(ass, encoding="utf-8")
     (work / "f").mkdir()
     for f in config.FONTS_DIR.glob("*.ttf"):
@@ -270,6 +303,8 @@ def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layo
             "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
     encoders = []
+    if _nvenc_ok is not False:
+        encoders.append(("nvenc", ["yuv420p", "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "22"]))
     if _qsv_ok is not False:
         encoders.append(("qsv", ["nv12", "-c:v", "h264_qsv", "-global_quality", "23", "-preset", "fast"]))
     encoders.append(("x264", ["yuv420p", "-c:v", "libx264", "-crf", "21", "-preset", "veryfast"]))
@@ -278,11 +313,15 @@ def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layo
         p = subprocess.run(base + enc + [f"{name}.mp4"], cwd=work, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", creationflags=NO_WINDOW, timeout=RENDER_SECONDS)
         if p.returncode == 0:
-            if label == "qsv":
+            if label == "nvenc":
+                _nvenc_ok = True
+            elif label == "qsv":
                 _qsv_ok = True
             break
         err = p.stderr[-1200:]
-        if label == "qsv":
+        if label == "nvenc":
+            _nvenc_ok = False
+        elif label == "qsv":
             _qsv_ok = False
     else:
         raise RuntimeError(f"Render failed: {err}")
@@ -292,3 +331,108 @@ def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layo
     for ext in ("mp4", "jpg", "ass"):
         shutil.move(str(work / f"{name}.{ext}"), str(out_dir / f"{name}.{ext}"))
     return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": layout}
+
+
+def render_podcast_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, title: str = "", uploader: str = "") -> dict:
+    """Renders an audio-only podcast into an MP4 clip with background card, live waveform, and subtitles."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    start, end = clip["start"], clip["end"]
+    hook_y, cap_y = 280, 1340
+    style = clip.get("style") or "clean_podcast"
+    if style not in STYLES:
+        style = "clean_podcast"
+    ass = build_ass(words, start, end, clip.get("hook", ""), style,
+                    clip.get("highlight_words", []), hook_y, cap_y)
+    work = Path(tempfile.mkdtemp(prefix="pk_pod"))
+    try:
+        return _render_podcast_in(work, src, out_dir, name, start, end, ass, title, uploader, clip.get("hook", ""))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _render_podcast_in(work: Path, src: Path, out_dir: Path, name: str, start, end, ass: str, title: str, uploader: str, hook: str) -> dict:
+    global _qsv_ok, _nvenc_ok
+    (work / f"{name}.ass").write_text(ass, encoding="utf-8")
+    (work / "f").mkdir()
+    for f in config.FONTS_DIR.glob("*.ttf"):
+        shutil.copyfile(f, work / "f" / f.name)
+
+    bg_path = work / "bg.png"
+    try:
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", (W, H), color=(14, 18, 26))
+        draw = ImageDraw.Draw(img)
+        for y in range(0, H, 4):
+            blend = y / H
+            r = int(14 + blend * 12)
+            g = int(18 + blend * 14)
+            b = int(26 + blend * 22)
+            draw.rectangle([0, y, W, y + 4], fill=(r, g, b))
+
+        cx, cy, cw, ch = W // 2, 680, 760, 760
+        x0, y0, x1, y1 = cx - cw // 2, cy - ch // 2, cx + cw // 2, cy + ch // 2
+        draw.rounded_rectangle([x0 - 4, y0 - 4, x1 + 4, y1 + 4], radius=32, fill=(30, 36, 48))
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=30, fill=(20, 25, 35), outline=(50, 60, 80), width=3)
+
+        draw.text((cx, y0 + 120), "AUDIO PODCAST", fill=(107, 215, 255), anchor="mm")
+        disp_title = (title or "Podcast Episode")[:45]
+        draw.text((cx, cy - 20), disp_title, fill=(255, 255, 255), anchor="mm")
+        if uploader:
+            draw.text((cx, cy + 60), f"with {uploader[:35]}", fill=(180, 190, 205), anchor="mm")
+        draw.text((cx, y1 - 90), "HIGHLIGHT CLIP", fill=(0, 240, 255), anchor="mm")
+        draw.text((W // 2, 120), "LISTEN & WATCH", fill=(140, 150, 170), anchor="mm")
+        img.save(str(bg_path), "PNG")
+    except Exception:
+        bg_path = None
+
+    dur = max(0.5, end - start)
+    if bg_path and bg_path.is_file():
+        bg_input = ["-loop", "1", "-i", str(bg_path)]
+        bg_node = "[0:v]"
+        audio_idx = "1"
+    else:
+        bg_input = ["-f", "lavfi", "-i", f"color=c=0x12151c:s={W}x{H}:d={dur:.2f}:r={config.OUT_FPS}"]
+        bg_node = "[0:v]"
+        audio_idx = "1"
+
+    fc = (f"[{audio_idx}:a]showwaves=s=880x160:mode=line:colors=0x00F0FF:scale=sqrt[wave];"
+          f"{bg_node}[wave]overlay=100:1060[v0];"
+          f"[v0]ass={name}.ass:fontsdir=f[v]")
+
+    base = ["ffmpeg", "-y", "-v", "error", *bg_input,
+            "-ss", f"{start:.2f}", "-t", f"{dur:.2f}", "-i", str(src),
+            "-filter_complex", fc, "-map", "[v]", "-map", f"{audio_idx}:a:0",
+            "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
+
+    encoders = []
+    if _nvenc_ok is not False:
+        encoders.append(("nvenc", ["yuv420p", "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "22"]))
+    if _qsv_ok is not False:
+        encoders.append(("qsv", ["nv12", "-c:v", "h264_qsv", "-global_quality", "23", "-preset", "fast"]))
+    encoders.append(("x264", ["yuv420p", "-c:v", "libx264", "-crf", "21", "-preset", "veryfast"]))
+
+    err = None
+    for label, enc in encoders:
+        p = subprocess.run(base + enc + ["-shortest", f"{name}.mp4"], cwd=work, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", creationflags=NO_WINDOW, timeout=RENDER_SECONDS)
+        if p.returncode == 0:
+            if label == "nvenc":
+                _nvenc_ok = True
+            elif label == "qsv":
+                _qsv_ok = True
+            break
+        err = p.stderr[-1200:]
+        if label == "nvenc":
+            _nvenc_ok = False
+        elif label == "qsv":
+            _qsv_ok = False
+    else:
+        raise RuntimeError(f"Podcast render failed: {err}")
+
+    cover_t = min(1.2, dur / 2)
+    run(["ffmpeg", "-y", "-v", "error", "-ss", f"{cover_t:.2f}", "-i", f"{name}.mp4", "-frames:v", "1",
+         "-q:v", "3", f"{name}.jpg"], cwd=work)
+    for ext in ("mp4", "jpg", "ass"):
+        shutil.move(str(work / f"{name}.{ext}"), str(out_dir / f"{name}.{ext}"))
+    return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": "podcast"}
