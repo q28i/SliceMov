@@ -17,11 +17,11 @@ import httpx
 
 from . import config
 
-REPO = (config.env("PEAKCUT_UPDATE_REPO") or "haziqahmedqasmi/peakcut").strip().strip("/")
-BRANCH = (config.env("PEAKCUT_UPDATE_BRANCH") or "main").strip()
-ON = config.env("PEAKCUT_UPDATE_CHECK", "1") != "0" and bool(re.fullmatch(r"[\w.\-]+/[\w.\-]+", REPO))
+REPO = (config.env("SLICEMOV_UPDATE_REPO") or config.env("PEAKCUT_UPDATE_REPO") or "q28i/SliceMov").strip().strip("/")
+BRANCH = (config.env("SLICEMOV_UPDATE_BRANCH") or config.env("PEAKCUT_UPDATE_BRANCH") or "main").strip()
+ON = config.env("SLICEMOV_UPDATE_CHECK", config.env("PEAKCUT_UPDATE_CHECK", "1")) != "0" and bool(re.fullmatch(r"[\w.\-]+/[\w.\-]+", REPO))
 EVERY = 60
-UA = {"User-Agent": "PeakCut-update-check"}
+UA = {"User-Agent": "SliceMov-update-check"}
 _state = {"checked": 0.0, "result": None, "seen": "", "notes": None}
 _lock = threading.Lock()
 _started = False

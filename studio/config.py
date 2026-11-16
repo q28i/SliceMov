@@ -52,9 +52,9 @@ def _read_secret(var: str, file_var: str, pattern: str) -> str:
 
 
 # ---------------------------------------------------------------- where things live
-# Everything PeakCut keeps is in one folder. Which one: PEAKCUT_DATA in .env if it is set; otherwise the folder the
-# owner chose in Settings, Storage (kept in storage.json); otherwise "data" inside PeakCut's own folder.
-STORAGE_FILE = Path(env("PEAKCUT_STORAGE_FILE") or ROOT / "storage.json")
+# Everything SliceMov keeps is in one folder. Which one: SLICEMOV_DATA or PEAKCUT_DATA in .env if set; otherwise the folder the
+# owner chose in Settings, Storage (kept in storage.json); otherwise "data" inside SliceMov's own folder.
+STORAGE_FILE = Path(env("SLICEMOV_STORAGE_FILE") or env("PEAKCUT_STORAGE_FILE") or ROOT / "storage.json")
 
 
 def _move_folder(old: Path, new: Path) -> bool:
@@ -65,7 +65,7 @@ def _move_folder(old: Path, new: Path) -> bool:
         return True
     items = list(old.iterdir())
     if items:
-        print(f"\n  Moving PeakCut's folder to {new} ({len(items)} things). This is done once and can take a while...", flush=True)
+        print(f"\n  Moving SliceMov's folder to {new} ({len(items)} things). This is done once and can take a while...", flush=True)
     done = True
     for item in items:
         target = new / item.name
@@ -95,8 +95,9 @@ def _move_folder(old: Path, new: Path) -> bool:
 
 
 def _data_folder():
-    if env("PEAKCUT_DATA"):
-        return Path(env("PEAKCUT_DATA")), "env"
+    data_env = env("SLICEMOV_DATA") or env("PEAKCUT_DATA")
+    if data_env:
+        return Path(data_env), "env"
     try:
         chosen = json.loads(STORAGE_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -107,9 +108,9 @@ def _data_folder():
     try:
         new.mkdir(parents=True, exist_ok=True)
     except OSError:
-        raise SystemExit(f"\n  PeakCut's folder is set to {new}, and that can't be reached right now.\n"
-                         f"  Connect that drive and start PeakCut again, or delete {STORAGE_FILE} to go back to the\n"
-                         f"  folder inside PeakCut (your videos and clips stay where they are).\n")
+        raise SystemExit(f"\n  SliceMov's folder is set to {new}, and that can't be reached right now.\n"
+                         f"  Connect that drive and start SliceMov again, or delete {STORAGE_FILE} to go back to the\n"
+                         f"  folder inside SliceMov (your videos and clips stay where they are).\n")
     if chosen.get("move_from"):
         if _move_folder(Path(chosen["move_from"]), new):
             STORAGE_FILE.write_text(json.dumps({"path": str(new)}, indent=1), encoding="utf-8")
@@ -118,14 +119,14 @@ def _data_folder():
 
 DATA_DIR, DATA_FROM = _data_folder()
 USERS_DIR = DATA_DIR / "users"          # users/<user id>/{creators,jobs,accounts}
-MODELS_DIR = Path(env("PEAKCUT_MODELS") or DATA_DIR / "models")
+MODELS_DIR = Path(env("SLICEMOV_MODELS") or env("PEAKCUT_MODELS") or DATA_DIR / "models")
 TMP_DIR = DATA_DIR / "tmp"
 FONTS_DIR = DATA_DIR / "fonts"          # caption fonts, copied from studio/fonts so every server renders the same
 # YouTube already has a word-by-word transcript of most videos. With this on, that is what the AI reads to find the
 # clips (seconds instead of transcribing hours), and our own model is run only on the clips themselves.
-YT_TRANSCRIPT = env("PEAKCUT_YT_TRANSCRIPT", "1") != "0"
-# the compact model for processors; a machine with a graphics card sets PEAKCUT_ASR_MODEL to the full-precision one
-ASR_MODEL_NAME = env("PEAKCUT_ASR_MODEL", "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8")
+YT_TRANSCRIPT = (env("SLICEMOV_YT_TRANSCRIPT") or env("PEAKCUT_YT_TRANSCRIPT", "1")) != "0"
+# the compact model for processors; a machine with a graphics card sets SLICEMOV_ASR_MODEL to the full-precision one
+ASR_MODEL_NAME = env("SLICEMOV_ASR_MODEL") or env("PEAKCUT_ASR_MODEL", "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8")
 ASR_MODEL_DIR = MODELS_DIR / ASR_MODEL_NAME
 DATABASE_URL = env("DATABASE_URL") or f"sqlite:///{(DATA_DIR / 'peakcut.db').as_posix()}"
 
@@ -140,19 +141,19 @@ def user_dir(uid: str) -> Path:
 
 
 # ---------------------------------------------------------------- the site
-HOST = env("PEAKCUT_HOST", "127.0.0.1")
-PORT = int(env("PEAKCUT_PORT") or "8765")
-PUBLIC_URL = (env("PEAKCUT_PUBLIC_URL") or f"http://127.0.0.1:{PORT}").rstrip("/")   # e.g. https://peakcut.com
+HOST = env("SLICEMOV_HOST") or env("PEAKCUT_HOST", "127.0.0.1")
+PORT = int(env("SLICEMOV_PORT") or env("PEAKCUT_PORT") or "8765")
+PUBLIC_URL = (env("SLICEMOV_PUBLIC_URL") or env("PEAKCUT_PUBLIC_URL") or f"http://127.0.0.1:{PORT}").rstrip("/")   # e.g. https://slicemov.com
 HTTPS = PUBLIC_URL.startswith("https://")
-SESSION_DAYS = int(env("PEAKCUT_SESSION_DAYS", "30"))
-# Accounts are off by default: PeakCut opens straight into the dashboard, with no sign-in, which is what you want
-# on your own computer. On a server that other people can reach, set PEAKCUT_ACCOUNTS=1: everyone then signs up
+SESSION_DAYS = int(env("SLICEMOV_SESSION_DAYS") or env("PEAKCUT_SESSION_DAYS", "30"))
+# Accounts are off by default: SliceMov opens straight into the dashboard, with no sign-in, which is what you want
+# on your own computer. On a server that other people can reach, set SLICEMOV_ACCOUNTS=1: everyone then signs up
 # and signs in, and each person only sees their own videos.
-ACCOUNTS = env("PEAKCUT_ACCOUNTS", "0") == "1"
+ACCOUNTS = (env("SLICEMOV_ACCOUNTS") or env("PEAKCUT_ACCOUNTS", "0")) == "1"
 # The two buttons along the top of the dashboard: the project's code, and where to follow its maker (feedback goes
 # there too). Set either to an empty value to hide that button, or point them at your own pages in a fork.
-REPO_URL = env("PEAKCUT_REPO_URL", "https://github.com/haziqahmedqasmi/peakcut").strip()
-FOLLOW_URL = env("PEAKCUT_FOLLOW_URL", "https://www.instagram.com/haziq.builds/").strip()
+REPO_URL = (env("SLICEMOV_REPO_URL") or env("PEAKCUT_REPO_URL") or "https://github.com/q28i/SliceMov").strip()
+FOLLOW_URL = (env("SLICEMOV_FOLLOW_URL") or env("PEAKCUT_FOLLOW_URL") or "https://github.com/q28i/SliceMov").strip()
 
 # ---------------------------------------------------------------- limits (per user, and for the whole server)
 # Your own PeakCut has no limits unless you set them: 0 (the default) means "none" for every limit below. The

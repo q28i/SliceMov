@@ -1,4 +1,4 @@
-"""PeakCut web server. Run with:  python -m studio.server
+"""SliceMov web server. Run with:  python -m studio.server
 
 Public pages:  /  /login  /signup          The app:  /app  (signed-in users only)
 Everything under /api, /media and /oauth needs a session, except /api/auth/* and /api/public."""
@@ -34,7 +34,7 @@ def _quiet(fn):
         print(f"  {e}", flush=True)
 
 
-app = FastAPI(title="PeakCut", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="SliceMov", docs_url=None, redoc_url=None, openapi_url=None)
 WEB = config.ROOT / "web"
 OPEN = ("/api/auth/", "/pub/", "/api/public", "/auth/google/", "/auth/verify", "/brand/", "/assets/", "/healthz", "/favicon.ico", "/robots.txt", "/sitemap.xml")
 PAGES = {"/": "landing.html", "/login": "auth.html", "/signup": "auth.html", "/reset": "reset.html",
@@ -363,9 +363,9 @@ def reset_page():
 
 
 LEGAL = {
-    "privacy": ("Privacy Policy", "How PeakCut collects, uses and protects your data, including Google user data, cookies and your privacy rights."),
-    "terms": ("Terms of Service", "The terms for using PeakCut, the AI clipping tool for streams and videos: accounts, availability and liability."),
-    "acceptable-use": ("Acceptable Use Policy", "What you may and may not do with PeakCut, the AI stream clipping tool."),
+    "privacy": ("Privacy Policy", "How SliceMov collects, uses and protects your data, including Google user data, cookies and your privacy rights."),
+    "terms": ("Terms of Service", "The terms for using SliceMov, the AI clipping tool for streams and videos: accounts, availability and liability."),
+    "acceptable-use": ("Acceptable Use Policy", "What you may and may not do with SliceMov, the AI stream clipping tool."),
 }
 
 
@@ -380,9 +380,9 @@ def legal_page(request: Request):
     contact = config.CONTACT_EMAIL
     who = (f'<a href="mailto:{_h.escape(contact)}">{_h.escape(contact)}</a>' if contact
            else "the contact details on our website")
-    name = _h.escape(config.LEGAL_NAME or "PeakCut")
+    name = _h.escape(config.LEGAL_NAME or "SliceMov")
     law = (f"the laws of {_h.escape(config.LEGAL_COUNTRY)}" if config.LEGAL_COUNTRY
-           else "the laws of the country where PeakCut's operator is established")
+           else "the laws of the country where SliceMov's operator is established")
     out = (_LEGAL_HTML or (WEB / "legal.html").read_text(encoding="utf-8"))
     for k, v in {"{{CONTACT}}": who, "{{PAGE}}": page, "{{PAGE_PATH}}": page, "{{SITE}}": _h.escape(config.PUBLIC_URL),
                  "{{NAME}}": name, "{{LAW}}": law, "{{TITLE}}": title, "{{DESC}}": desc}.items():
@@ -1040,7 +1040,7 @@ def clips_zip(ids: str = ""):
     except ValueError as e:
         raise HTTPException(400, str(e))
     from starlette.background import BackgroundTask
-    return FileResponse(f, filename=f"peakcut-clips-{len(pairs)}.zip", media_type="application/zip",
+    return FileResponse(f, filename=f"slicemov-clips-{len(pairs)}.zip", media_type="application/zip",
                         headers={"Cache-Control": "private, no-store"}, background=BackgroundTask(lambda: f.unlink(missing_ok=True)))
 
 
@@ -1621,18 +1621,18 @@ def admin_delete_user(request: Request, uid: str, body: dict = Body(...)):
 
 
 def main():
-    print(f"\n  PeakCut is running:  {config.PUBLIC_URL}\n")
+    print(f"\n  SliceMov is running:  {config.PUBLIC_URL}\n")
     if not config.ACCOUNTS and (config.HTTPS or config.HOST not in ("127.0.0.1", "localhost", "::1")):
-        print("  Sign-in is off, so anyone who can reach this address can use PeakCut and its AI key.\n"
-              "  On a server other people can reach, set PEAKCUT_ACCOUNTS=1 in .env.\n", flush=True)
-    if config.env("PEAKCUT_AUTO_RELOAD") == "1":
+        print("  Sign-in is off, so anyone who can reach this address can use SliceMov and its AI key.\n"
+              "  On a server other people can reach, set SLICEMOV_ACCOUNTS=1 in .env.\n", flush=True)
+    if config.env("SLICEMOV_AUTO_RELOAD") == "1" or config.env("PEAKCUT_AUTO_RELOAD") == "1":
         # restart by itself whenever the server code changes (pages in web/ never need a restart)
         uvicorn.run("studio.server:app", host=config.HOST, port=config.PORT, log_level="warning", backlog=4096, reload=True,
                     reload_dirs=[str(config.ROOT / "studio")], reload_includes=["*.py"],
-                    proxy_headers=bool(config.env("PEAKCUT_TRUST_PROXY")), forwarded_allow_ips="*")
+                    proxy_headers=bool(config.env("SLICEMOV_TRUST_PROXY") or config.env("PEAKCUT_TRUST_PROXY")), forwarded_allow_ips="*")
         return
     uvicorn.run(app, host=config.HOST, port=config.PORT, log_level="warning", backlog=4096,
-                proxy_headers=bool(config.env("PEAKCUT_TRUST_PROXY")), forwarded_allow_ips="*")
+                proxy_headers=bool(config.env("SLICEMOV_TRUST_PROXY") or config.env("PEAKCUT_TRUST_PROXY")), forwarded_allow_ips="*")
 
 
 if __name__ == "__main__":
