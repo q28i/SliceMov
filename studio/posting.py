@@ -172,6 +172,7 @@ def _caption(clip, creator):
 
 
 def _post(p):
+    import hashlib
     job = jobs.get(p["job"])
     clip = next((c for c in job["clips"] if c["id"] == p["clip"]), None) if job else None
     acc = accounts.get(p["account"])
@@ -181,47 +182,88 @@ def _post(p):
         if not acc:
             raise RuntimeError("That account was disconnected.")
         path = Path(job["dir"]) / "clips" / clip["file"]
+        if not path.is_file():
+            raise RuntimeError("The rendered clip file is missing.")
+        try:
+            with path.open("rb") as f:
+                p["fingerprint"] = hashlib.sha256(f.read()).hexdigest()[:32]
+        except Exception:
+            pass
+
         creator = creators.get(job["creator"]) or dict(creators.DEFAULTS, name="clips")
         title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator)
 
-        # Pre-upload verification: If retrying, check if remote post already exists to prevent duplicate uploads
-        if p.get("tries", 0) > 0:
-            if acc["platform"] == "youtube" and title:
-                found_id, found_url = accounts.youtube_find_recent(acc, title)
-                if found_id:
-                    p.update(status="posted", posted_at=time.time(), remote_id=found_id, url=found_url, error=None, expedited=False)
-                    creators.log(p["creator"], f"Verified existing YouTube upload: {title}")
-                    _save()
-                    _mirror(p)
-                    return
-            elif acc["platform"] == "instagram" and title:
-                found_id, found_url = accounts.instagram_find_recent(acc, title)
-                if found_id:
-                    p.update(status="posted", posted_at=time.time(), remote_id=found_id, url=found_url, error=None, expedited=False)
-                    creators.log(p["creator"], f"Verified existing Instagram Reel: {title}")
-                    _save()
-                    _mirror(p)
-                    return
+        def on_session(sid):
+            p["session_id"] = str(sid)
+            _save()
+            _mirror(p)
 
-        if acc["platform"] == "youtube":
-            rid, url = accounts.youtube_upload(acc, path, title, cap + "\n\n#Shorts", clip.get("hashtags", []), creator["privacy"])
-        elif acc["platform"] == "instagram":
-            rid, url = accounts.instagram_upload(acc, path, f"{title}\n\n{cap}", job["id"])
-        elif acc["platform"] == "tiktok":
-            rid, url = accounts.tiktok_upload(acc, path, f"{title}\n\n{cap}", creator["privacy"])
-        else:
-            raise RuntimeError("That kind of account is no longer supported.")
-        p.update(status="posted", posted_at=time.time(), remote_id=rid, url=url, error=None, expedited=False)
+        # Deterministic Session Verification: If a session ID was recorded, check if it completed remotely
+        if p.get("session_id"):
+            if acc["platform"] == "youtube":
+                found_id, found_url = accounts.youtube_check_session(acc, p["session_id"], path.stat().st_size)
+            elif acc["platform"] == "instagram":
+                found_id, found_url = accounts.instagram_check_session(acc, p["session_id"])
+            elif acc["platform"] == "tiktok":
+                found_id, found_url = accounts.tiktok_check_session(acc, p["session_id"])
+            else:
+                found_id, found_url = None, None
+
+            if found_id:
+                p.update(status="posted", posted_at=time.time(), remote_id=found_id, url=found_url,
+                         error=None, expedited=False, ambiguous=False)
+                creators.log(p["creator"], f"Verified existing remote session completed on {acc['name']}: {title}")
+                _save()
+                _mirror(p)
+                return
+
+        try:
+            if acc["platform"] == "youtube":
+                rid, url = accounts.youtube_upload(acc, path, title, cap + "\n\n#Shorts", clip.get("hashtags", []), creator["privacy"], on_session=on_session)
+            elif acc["platform"] == "instagram":
+                rid, url = accounts.instagram_upload(acc, path, f"{title}\n\n{cap}", job["id"], on_session=on_session)
+            elif acc["platform"] == "tiktok":
+                rid, url = accounts.tiktok_upload(acc, path, f"{title}\n\n{cap}", creator["privacy"], on_session=on_session)
+            else:
+                raise RuntimeError("That kind of account is no longer supported.")
+        except TypeError as te:
+            if "on_session" in str(te):
+                if acc["platform"] == "youtube":
+                    rid, url = accounts.youtube_upload(acc, path, title, cap + "\n\n#Shorts", clip.get("hashtags", []), creator["privacy"])
+                elif acc["platform"] == "instagram":
+                    rid, url = accounts.instagram_upload(acc, path, f"{title}\n\n{cap}", job["id"])
+                elif acc["platform"] == "tiktok":
+                    rid, url = accounts.tiktok_upload(acc, path, f"{title}\n\n{cap}", creator["privacy"])
+                else:
+                    raise
+            else:
+                raise
+        p.update(status="posted", posted_at=time.time(), remote_id=rid, url=url, error=None, expedited=False, ambiguous=False)
         creators.log(p["creator"], f"Posted to {acc['name']}: {title}")
     except Exception as e:  # noqa: BLE001
-        p["tries"] += 1
-        p["error"] = str(e)[-300:]
-        if p["tries"] < 3 and clip and acc:
-            p.update(status="scheduled", due_at=time.time() + 600)  # try again in 10 minutes
+        err_msg = str(e)[-300:]
+        p["error"] = err_msg
+
+        # An outcome is ambiguous if an upload session was registered or if the failure was a network/transfer timeout
+        is_ambiguous = bool(p.get("session_id")) or any(term in err_msg.lower() for term in (
+            "timeout", "timed out", "connection reset", "broken pipe", "stream", "remote disconnected",
+            "transfer", "readtimeout", "connecttimeout"
+        ))
+
+        if is_ambiguous:
+            # NEVER automatically retry an ambiguous upload: halt retries to prevent duplicate remote posts
+            p.update(status="failed", ambiguous=True,
+                     error=f"Upload outcome uncertain: {err_msg}. Automatic retry halted to prevent duplicate posts. Use Reconcile or Review.")
+            creators.log(p["creator"], f"Upload ambiguous for {acc['name'] if acc else 'account'}: {p.get('title')}. Automatic retry halted.")
+            alerts.notify(f"upload ambiguous on {p.get('account_name', 'account')} ({p.get('title')}): {err_msg[:150]}", kind="post")
         else:
-            p["status"] = "failed"
-            creators.log(p["creator"], f"Post failed on {p['account_name']}: {p['error']}")
-            alerts.notify(f"post failed on {p['account_name']} ({p['title']}): {p['error'][:200]}", kind="post")
+            p["tries"] += 1
+            if p["tries"] < 3 and clip and acc:
+                p.update(status="scheduled", due_at=time.time() + 600, ambiguous=False)
+            else:
+                p.update(status="failed", ambiguous=False)
+                creators.log(p["creator"], f"Post failed on {p['account_name']}: {p['error']}")
+                alerts.notify(f"post failed on {p['account_name']} ({p['title']}): {p['error'][:200]}", kind="post")
     _save()
     _mirror(p)
 
@@ -350,26 +392,30 @@ def reconcile(pid):
                         return {"reconciled": True, "status": "posted", "url": p.get("url", "")}
             except Exception:
                 pass
-        else:
-            # No remote_id recorded yet (e.g. timeout during HTTP request); check remote channel by title
+        elif p.get("session_id"):
+            # Verify persistent upload session deterministically
             try:
-                if p["platform"] == "youtube" and p.get("title"):
-                    found_id, found_url = accounts.youtube_find_recent(acc, p["title"])
-                    if found_id:
-                        p.update(status="posted", remote_id=found_id, url=found_url, error=None)
-                        _save()
-                        _mirror(p)
-                        return {"reconciled": True, "status": "posted", "url": p["url"]}
-                elif p["platform"] == "instagram" and (p.get("title") or p.get("caption")):
-                    found_id, found_url = accounts.instagram_find_recent(acc, p.get("title") or p.get("caption"))
-                    if found_id:
-                        p.update(status="posted", remote_id=found_id, url=found_url, error=None)
-                        _save()
-                        _mirror(p)
-                        return {"reconciled": True, "status": "posted", "url": p["url"]}
+                job = jobs.get(p["job"])
+                clip = next((c for c in job["clips"] if c["id"] == p["clip"]), None) if job else None
+                path = Path(job["dir"]) / "clips" / clip["file"] if clip else None
+                size = path.stat().st_size if path and path.is_file() else 0
+                if p["platform"] == "youtube":
+                    fid, furl = accounts.youtube_check_session(acc, p["session_id"], size)
+                elif p["platform"] == "instagram":
+                    fid, furl = accounts.instagram_check_session(acc, p["session_id"])
+                elif p["platform"] == "tiktok":
+                    fid, furl = accounts.tiktok_check_session(acc, p["session_id"])
+                else:
+                    fid, furl = None, None
+
+                if fid:
+                    p.update(status="posted", remote_id=fid, url=furl, error=None, ambiguous=False)
+                    _save()
+                    _mirror(p)
+                    return {"reconciled": True, "status": "posted", "url": furl}
             except Exception:
                 pass
-        p.update(status="scheduled", due_at=time.time(), tries=0, error=None)
+        p.update(status="scheduled", due_at=time.time(), tries=0, error=None, ambiguous=False)
         _save()
     _mirror(p)
     wake()

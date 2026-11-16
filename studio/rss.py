@@ -31,15 +31,9 @@ def _clean_text(s: Optional[str], limit: int = 400) -> str:
 def parse_podcast_feed(url_or_content: str, max_episodes: int = 25) -> dict:
     """Fetch and parse an RSS podcast feed into structured podcast and episode metadata."""
     if url_or_content.strip().startswith(("http://", "https://")):
-        feed_url = url_or_content.strip()
-        from urllib.parse import urlparse
-        from studio.media import is_safe_host
-        u = urlparse(feed_url)
-        if not is_safe_host(u.hostname):
-            raise ValueError("Access to local or private network addresses is blocked for security (SSRF prevention).")
-        req = urllib.request.Request(feed_url, headers=UA)
-        with urllib.request.urlopen(req, timeout=15) as r:
-            raw = r.read(5_000_000)  # max 5MB XML
+        from studio.media import safe_fetch_url
+        raw, _ = safe_fetch_url(url_or_content.strip(), max_bytes=5_000_000,
+                                allowed_content_types=("xml", "text/", "application/rss", "application/atom"))
     else:
         raw = url_or_content.encode("utf-8") if isinstance(url_or_content, str) else url_or_content
 
@@ -133,22 +127,8 @@ def parse_podcast_feed(url_or_content: str, max_episodes: int = 25) -> dict:
 
 
 def download_podcast_episode(audio_url: str, dest_path: Path, max_bytes: int = 500_000_000) -> Path:
-    """Download an episode's audio file directly to a destination path."""
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    from urllib.parse import urlparse
-    from studio.media import is_safe_host
-    u = urlparse(audio_url.strip())
-    if not is_safe_host(u.hostname):
-        raise ValueError("Access to local or private network addresses is blocked for security (SSRF prevention).")
-    req = urllib.request.Request(audio_url, headers=UA)
-    with urllib.request.urlopen(req, timeout=30) as resp, dest_path.open("wb") as out:
-        downloaded = 0
-        while True:
-            chunk = resp.read(65536)
-            if not chunk:
-                break
-            downloaded += len(chunk)
-            if downloaded > max_bytes:
-                raise ValueError("Episode audio exceeds maximum size limit (500MB).")
-            out.write(chunk)
-    return dest_path
+    """Download an episode's audio file directly to a destination path with strict security checks."""
+    from studio.media import safe_download_file
+    return safe_download_file(audio_url, dest_path, max_bytes=max_bytes,
+                              allowed_content_types=("audio/", "application/octet-stream", "application/ogg", "video/mp4"),
+                              validate_audio=True)

@@ -96,16 +96,19 @@ def test_multi_platform_independence_and_reconcile():
     # Track uploads
     posted = []
 
-    def mock_yt(acc, path, title, cap, tags, priv):
+    def mock_yt(acc, path, title, cap, tags, priv, on_session=None):
+        if on_session:
+            on_session("https://upload.youtube.com/upload_session_mock")
         posted.append("yt")
         return "yt_vid_99", "https://youtube.com/shorts/yt_vid_99"
 
-    def mock_ig(acc, path, cap, job_id):
+    def mock_ig(acc, path, cap, job_id, on_session=None):
+        if on_session:
+            on_session("ig_container_mock_88")
         posted.append("ig")
         return "ig_media_88", "https://instagram.com/reel/ig_media_88"
 
-    def mock_tt(acc, path, cap, priv):
-        # Simulate TikTok failure / manual export requirement
+    def mock_tt(acc, path, cap, priv, on_session=None):
         posted.append("tt_failed")
         raise RuntimeError("TikTok API requires audited developer status for public feed posting.")
 
@@ -195,6 +198,42 @@ def test_multi_platform_independence_and_reconcile():
         check("reconcile reconciled True", rec_data.get("reconciled"), True)
         check("reconcile status is posted", rec_data.get("status"), "posted")
         check("reconcile restored url", "https://youtube.com/shorts/yt_remote_verified" in rec_data.get("url", ""), True)
+
+    # 4. Test Ambiguous outcome handling: Never automatically retry ambiguous upload
+    with ctx.as_user(user.id):
+        p_ambig = {
+            "id": "post_ambig_1", "job": jid, "clip": cid, "account": yt_acc["id"], "user": user.id,
+            "creator": "c_1", "account_name": "My YT Shorts", "platform": "youtube", "title": "Ambig Test",
+            "caption": "test", "status": "scheduled", "due_at": time.time(), "tries": 0,
+            "views": 0, "comments": 0, "likes": 0
+        }
+        posting._posts.append(p_ambig)
+        posting._save()
+
+    def mock_yt_timeout(*args, **kwargs):
+        if kwargs.get("on_session"):
+            kwargs["on_session"]("https://upload.youtube.com/session_timeout_test")
+        raise RuntimeError("httpx.ReadTimeout: The read operation timed out during data transfer")
+
+    with patch("studio.accounts.youtube_upload", side_effect=mock_yt_timeout):
+        with ctx.as_user(user.id):
+            p_to_run = next(p for p in posting._mine() if p["id"] == "post_ambig_1")
+            posting._post(p_to_run)
+
+            p_res = next(p for p in posting._mine() if p["id"] == "post_ambig_1")
+            check("ambiguous upload marked failed", p_res["status"], "failed")
+            check("ambiguous flag is True", p_res.get("ambiguous", False), True)
+            check("session_id was preserved", p_res.get("session_id"), "https://upload.youtube.com/session_timeout_test")
+            check("status is not scheduled (no auto-retry)", p_res["status"] != "scheduled", True)
+
+            # 5. Deterministic session reconciliation
+            with patch("studio.accounts.youtube_check_session", return_value=("yt_session_vid_123", "https://youtube.com/shorts/yt_session_vid_123")):
+                res_rec_session = client.post("/api/posts/post_ambig_1/reconcile")
+                check("reconcile using session_id returned 200", res_rec_session.status_code, 200)
+                check("reconcile using session_id reconciled True", res_rec_session.json().get("reconciled"), True)
+                p_rec = next(p for p in posting._mine() if p["id"] == "post_ambig_1")
+                check("status updated to posted", p_rec["status"], "posted")
+                check("remote_id is session resolved ID", p_rec["remote_id"], "yt_session_vid_123")
 
 
 if __name__ == "__main__":

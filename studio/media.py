@@ -95,6 +95,173 @@ def is_safe_host(host: str) -> bool:
         return False
 
 
+def validate_audio_header(data: bytes) -> bool:
+    """Inspect the first bytes for valid audio container signatures (MP3, M4A, WAV, OGG, FLAC, AAC)."""
+    if len(data) < 4:
+        return False
+    if data.startswith(b"ID3"):
+        return True
+    if data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+        return True
+    if b"ftyp" in data[:16]:
+        return True
+    if data.startswith(b"RIFF") and b"WAVE" in data[:16]:
+        return True
+    if data.startswith(b"OggS"):
+        return True
+    if data.startswith(b"fLaC"):
+        return True
+    if data[0] == 0xFF and (data[1] & 0xF6) == 0xF0:
+        return True
+    return False
+
+
+def safe_fetch_url(url: str, max_bytes: int = 5_000_000, allowed_content_types: tuple = (),
+                   timeout: int = 20, max_redirects: int = 5) -> tuple:
+    """Safely fetch an external HTTP/HTTPS resource with strict defenses:
+    1. Re-validates every redirect hop against private/loopback/metadata IP ranges (anti-SSRF).
+    2. Blocks redirect protocol downgrades (HTTPS -> HTTP).
+    3. Enforces streaming size limits to prevent zip/decompression bombs and memory exhaustion.
+    4. Validates Content-Type header against allowed patterns.
+    Returns (content_bytes, headers_dict)."""
+    from urllib.parse import urljoin, urlparse
+    import httpx
+
+    current_url = url.strip()
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PeakCut-Enhanced/2.0 MediaFetch"}
+
+    with httpx.Client(follow_redirects=False, timeout=timeout) as client:
+        for _ in range(max_redirects + 1):
+            u = urlparse(current_url)
+            if u.scheme not in ("http", "https"):
+                raise ValueError(f"Unsupported URL scheme '{u.scheme}'. Only HTTP and HTTPS are allowed.")
+            if not is_safe_host(u.hostname):
+                raise ValueError(f"Access to private, loopback, or metadata host '{u.hostname}' is blocked for security (SSRF prevention).")
+
+            resp = client.send(client.build_request("GET", current_url, headers=headers), stream=True)
+
+            if resp.status_code in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("Location")
+                if not loc:
+                    resp.close()
+                    raise ValueError("Redirect response missing Location header.")
+                next_url = urljoin(current_url, loc)
+                next_u = urlparse(next_url)
+                if u.scheme == "https" and next_u.scheme == "http":
+                    resp.close()
+                    raise ValueError("Redirect protocol downgrade from HTTPS to HTTP is blocked for security.")
+                if not is_safe_host(next_u.hostname):
+                    resp.close()
+                    raise ValueError(f"Redirect to blocked or private destination '{next_u.hostname}' was rejected (SSRF prevention).")
+                current_url = next_url
+                resp.close()
+                continue
+
+            if resp.status_code >= 400:
+                resp.close()
+                raise ValueError(f"HTTP request failed with status {resp.status_code}")
+
+            ctype = resp.headers.get("content-type", "").lower()
+            if allowed_content_types:
+                if not any(allowed in ctype for allowed in allowed_content_types):
+                    resp.close()
+                    raise ValueError(f"Invalid Content-Type '{ctype}'. Allowed: {allowed_content_types}")
+
+            chunks = []
+            total_bytes = 0
+            try:
+                for chunk in resp.iter_bytes(chunk_size=65536):
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        raise ValueError(f"Response body exceeded maximum allowed size of {max_bytes:,} bytes.")
+                    chunks.append(chunk)
+            finally:
+                resp.close()
+
+            return b"".join(chunks), dict(resp.headers)
+
+        raise ValueError(f"Too many redirects (exceeded limit of {max_redirects}).")
+
+
+def safe_download_file(url: str, dest_path: Path, max_bytes: int = 500_000_000,
+                       allowed_content_types: tuple = (), timeout: int = 30,
+                       max_redirects: int = 5, validate_audio: bool = True) -> Path:
+    """Safely stream-download an external audio/media file to dest_path with strict security:
+    1. Re-validates every redirect hop against private/loopback/cloud metadata ranges.
+    2. Enforces streaming chunk size limit to disk.
+    3. Validates Content-Type and initial audio magic bytes (rejects HTML, executables, scripts)."""
+    from urllib.parse import urljoin, urlparse
+    import httpx
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    current_url = url.strip()
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PeakCut-Enhanced/2.0 MediaFetch"}
+
+    with httpx.Client(follow_redirects=False, timeout=timeout) as client:
+        for _ in range(max_redirects + 1):
+            u = urlparse(current_url)
+            if u.scheme not in ("http", "https"):
+                raise ValueError(f"Unsupported URL scheme '{u.scheme}'. Only HTTP and HTTPS are allowed.")
+            if not is_safe_host(u.hostname):
+                raise ValueError(f"Access to private, loopback, or metadata host '{u.hostname}' is blocked for security (SSRF prevention).")
+
+            resp = client.send(client.build_request("GET", current_url, headers=headers), stream=True)
+
+            if resp.status_code in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("Location")
+                if not loc:
+                    resp.close()
+                    raise ValueError("Redirect response missing Location header.")
+                next_url = urljoin(current_url, loc)
+                next_u = urlparse(next_url)
+                if u.scheme == "https" and next_u.scheme == "http":
+                    resp.close()
+                    raise ValueError("Redirect protocol downgrade from HTTPS to HTTP is blocked for security.")
+                if not is_safe_host(next_u.hostname):
+                    resp.close()
+                    raise ValueError(f"Redirect to blocked or private destination '{next_u.hostname}' was rejected (SSRF prevention).")
+                current_url = next_url
+                resp.close()
+                continue
+
+            if resp.status_code >= 400:
+                resp.close()
+                raise ValueError(f"HTTP request failed with status {resp.status_code}")
+
+            ctype = resp.headers.get("content-type", "").lower()
+            if allowed_content_types:
+                if not any(allowed in ctype for allowed in allowed_content_types):
+                    resp.close()
+                    raise ValueError(f"Invalid Content-Type '{ctype}'. Allowed: {allowed_content_types}")
+
+            total_bytes = 0
+            checked_magic = False
+            try:
+                with dest_path.open("wb") as out:
+                    for chunk in resp.iter_bytes(chunk_size=65536):
+                        if not checked_magic and validate_audio and chunk:
+                            if not validate_audio_header(chunk):
+                                raise ValueError("Downloaded media does not match any valid audio format signature.")
+                            checked_magic = True
+                        total_bytes += len(chunk)
+                        if total_bytes > max_bytes:
+                            raise ValueError(f"Downloaded media exceeded maximum allowed size of {max_bytes:,} bytes.")
+                        out.write(chunk)
+            except Exception:
+                if dest_path.exists():
+                    try:
+                        dest_path.unlink()
+                    except OSError:
+                        pass
+                raise
+            finally:
+                resp.close()
+
+            return dest_path
+
+        raise ValueError(f"Too many redirects (exceeded limit of {max_redirects}).")
+
+
 def site_allowed(url: str) -> bool:
     """Links are fetched by the server: accepted video sites, or direct audio/podcast files (.mp3, .m4a, .wav)."""
     from urllib.parse import urlparse

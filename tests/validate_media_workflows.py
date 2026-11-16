@@ -216,6 +216,38 @@ def main():
         except ValueError as e:
             check("Episode download blocks private IP with security error", "SSRF" in str(e) or "blocked" in str(e), True)
 
+        # Audio magic byte validation
+        fake_mp3 = tmpdir / "fake.mp3"
+        fake_mp3.write_text("<!DOCTYPE html><html><body>Not an audio file</body></html>", encoding="utf-8")
+        check("validate_audio_header rejects HTML", media.validate_audio_header(fake_mp3.read_bytes()[:32]), False)
+
+        valid_id3 = b"ID3\x04\x00\x00\x00\x00\x00\x00\xff\xfb\x90\x00"
+        check("validate_audio_header accepts MP3 ID3", media.validate_audio_header(valid_id3), True)
+
+        valid_riff = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00"
+        check("validate_audio_header accepts WAV RIFF", media.validate_audio_header(valid_riff), True)
+
+        # Oversized response cap test (using safe_fetch_url with 100 byte limit)
+        from unittest.mock import patch
+        import httpx
+
+        mock_resp = httpx.Response(200, content=b"A" * 500, headers={"content-type": "text/xml"})
+        with patch("httpx.Client.send", return_value=mock_resp):
+            try:
+                media.safe_fetch_url("https://example.com/huge.xml", max_bytes=100)
+                check("safe_fetch_url aborts on oversized body", False, True)
+            except ValueError as e:
+                check("safe_fetch_url aborts on oversized body", "exceeded" in str(e).lower(), True)
+
+        # Redirect-based SSRF defense test (redirect to 127.0.0.1)
+        mock_redirect = httpx.Response(302, headers={"Location": "http://127.0.0.1:8765/secret_feed.xml"})
+        with patch("httpx.Client.send", return_value=mock_redirect):
+            try:
+                media.safe_fetch_url("https://example.com/feed.xml")
+                check("safe_fetch_url blocks redirect to private IP", False, True)
+            except ValueError as e:
+                check("safe_fetch_url blocks redirect to private IP", "blocked" in str(e).lower() or "rejected" in str(e).lower(), True)
+
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

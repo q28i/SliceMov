@@ -338,7 +338,7 @@ def _yt_token(acc) -> str:
     return acc["access_token"]
 
 
-def youtube_upload(acc, path: Path, title: str, description: str, tags: list, privacy: str):
+def youtube_upload(acc, path: Path, title: str, description: str, tags: list, privacy: str, on_session=None):
     token = _yt_token(acc)
     meta = {"snippet": {"title": re.sub(r"[<>]", "", title)[:100] or "Clip", "description": re.sub(r"[<>]", "", description)[:4900],
                         "tags": tags[:15], "categoryId": "20"},
@@ -348,11 +348,36 @@ def youtube_upload(acc, path: Path, title: str, description: str, tags: list, pr
                               params={"uploadType": "resumable", "part": "snippet,status"}, json=meta,
                               headers={"Authorization": f"Bearer {token}", "X-Upload-Content-Type": "video/mp4",
                                        "X-Upload-Content-Length": str(size)}, timeout=60), "Starting the YouTube upload")
+    session_url = start.headers.get("Location")
+    if on_session and session_url:
+        try:
+            on_session(session_url)
+        except Exception:
+            pass
     with path.open("rb") as f:
-        done = _check(httpx.put(start.headers["Location"], content=f.read(),
+        done = _check(httpx.put(session_url, content=f.read(),
                                 headers={"Authorization": f"Bearer {token}", "Content-Type": "video/mp4"}, timeout=900),
                       "Uploading to YouTube").json()
     return done["id"], f"https://www.youtube.com/shorts/{done['id']}"
+
+
+def youtube_check_session(acc, session_url: str, size: int):
+    """Deterministically check if an in-progress or interrupted YouTube resumable session finished.
+    Returns (video_id, url) if upload finished, or (None, None) if incomplete / expired."""
+    if not session_url:
+        return None, None
+    token = _yt_token(acc)
+    try:
+        r = httpx.put(session_url,
+                      headers={"Authorization": f"Bearer {token}", "Content-Range": f"bytes */{size}"},
+                      timeout=30)
+        if r.status_code in (200, 201):
+            vid = r.json().get("id")
+            if vid:
+                return vid, f"https://www.youtube.com/shorts/{vid}"
+    except Exception:
+        pass
+    return None, None
 
 
 def youtube_views(acc, ids: list) -> dict:
@@ -364,27 +389,6 @@ def youtube_views(acc, ids: list) -> dict:
         for it in r.get("items", []):
             out[it["id"]] = int(it["statistics"].get("viewCount", 0))
     return out
-
-
-def youtube_find_recent(acc, title: str):
-    """Check if a video with this title was recently uploaded to the authenticated channel."""
-    try:
-        token = _yt_token(acc)
-        r = httpx.get("https://www.googleapis.com/youtube/v3/search",
-                      params={"part": "snippet", "forMine": "true", "type": "video", "order": "date", "maxResults": 10},
-                      headers={"Authorization": f"Bearer {token}"}, timeout=15)
-        if r.status_code == 200:
-            clean_title = re.sub(r"[<>]", "", title).strip()[:100].lower()
-            for item in r.json().get("items", []):
-                snippet = item.get("snippet", {})
-                item_title = snippet.get("title", "").strip().lower()
-                if clean_title and (item_title == clean_title or clean_title in item_title):
-                    vid = item["id"].get("videoId")
-                    if vid:
-                        return vid, f"https://www.youtube.com/shorts/{vid}"
-    except Exception:
-        pass
-    return None, None
 
 
 # ------------------------------------------------------------------ Instagram (Instagram Login, professional accounts)
@@ -431,7 +435,7 @@ def _ig_token(acc) -> str:
     return acc["token"]
 
 
-def instagram_upload(acc, path: Path, caption: str, job_id: str = ""):
+def instagram_upload(acc, path: Path, caption: str, job_id: str = "", on_session=None):
     """A Reel. On a public site Instagram fetches the clip from a one-hour signed link; on a computer it cannot
     reach, the file is sent instead (only possible for some app types)."""
     token = _ig_token(acc)
@@ -445,11 +449,21 @@ def instagram_upload(acc, path: Path, caption: str, job_id: str = ""):
         box = _check(httpx.post(f"{IG}/{uid}/media", data={"media_type": "REELS", "upload_type": "resumable",
                                                            "caption": caption[:2200], "share_to_feed": "true"},
                                 headers=auth, timeout=60), "Starting the Instagram upload").json()
+        if on_session and box.get("id"):
+            try:
+                on_session(box["id"])
+            except Exception:
+                pass
         with path.open("rb") as f:
             _check(httpx.post(f"{IG_UPLOAD}/{box['id']}", content=f.read(),
                               headers={"Authorization": f"OAuth {token}", "offset": "0",
                                        "file_size": str(path.stat().st_size)}, timeout=900),
                    "Uploading to Instagram (posting from a computer needs a public https address)")
+    if on_session and box.get("id"):
+        try:
+            on_session(box["id"])
+        except Exception:
+            pass
     for _ in range(90):
         st = _check(httpx.get(f"{IG}/{box['id']}", params={"fields": "status_code,status"}, headers=auth, timeout=30),
                     "Checking the Instagram upload").json()
@@ -470,6 +484,33 @@ def instagram_upload(acc, path: Path, caption: str, job_id: str = ""):
     return pub["id"], link
 
 
+def instagram_check_session(acc, container_id: str):
+    """Deterministically check if an Instagram Reel media container has finished and publish it."""
+    if not container_id:
+        return None, None
+    token = _ig_token(acc)
+    auth = {"Authorization": f"Bearer {token}"}
+    uid = acc.get("user_id")
+    try:
+        st = httpx.get(f"{IG}/{container_id}", params={"fields": "status_code,status"}, headers=auth, timeout=20).json()
+        code = st.get("status_code")
+        if code == "PUBLISHED":
+            return container_id, f"https://www.instagram.com/reel/{container_id}/"
+        if code == "FINISHED" and uid:
+            pub = _check(httpx.post(f"{IG}/{uid}/media_publish", data={"creation_id": container_id}, headers=auth, timeout=60),
+                         "Publishing on Instagram").json()
+            mid = pub.get("id")
+            link = ""
+            try:
+                link = httpx.get(f"{IG}/{mid}", params={"fields": "permalink"}, headers=auth, timeout=15).json().get("permalink", "")
+            except Exception:
+                pass
+            return mid, link or f"https://www.instagram.com/reel/{mid}/"
+    except Exception:
+        pass
+    return None, None
+
+
 def instagram_views(acc, media_id: str):
     r = httpx.get(f"{IG}/{media_id}/insights", params={"metric": "views"},
                   headers={"Authorization": f"Bearer {_ig_token(acc)}"}, timeout=30)
@@ -477,29 +518,6 @@ def instagram_views(acc, media_id: str):
         return None
     data = r.json().get("data", [])
     return int(data[0]["values"][0]["value"]) if data else None
-
-
-def instagram_find_recent(acc, caption: str):
-    """Check if a reel with this caption prefix was recently published to this account."""
-    try:
-        token = _ig_token(acc)
-        uid = acc.get("user_id")
-        if not uid:
-            return None, None
-        r = httpx.get(f"{IG}/{uid}/media",
-                      params={"fields": "id,caption,permalink", "limit": 10},
-                      headers={"Authorization": f"Bearer {token}"}, timeout=15)
-        if r.status_code == 200:
-            clean_cap = caption.strip()[:60].lower()
-            for item in r.json().get("data", []):
-                item_cap = (item.get("caption") or "").strip().lower()
-                if clean_cap and clean_cap in item_cap:
-                    mid = item.get("id")
-                    permalink = item.get("permalink") or f"https://www.instagram.com/reel/{mid}/"
-                    return mid, permalink
-    except Exception:
-        pass
-    return None, None
 
 
 # ------------------------------------------------------------------ TikTok (Login Kit + Content Posting API)
@@ -574,7 +592,7 @@ def _tt_chunks(size: int) -> tuple:
     return 10_000_000, size // 10_000_000
 
 
-def tiktok_upload(acc, path: Path, caption: str, privacy: str = "public"):
+def tiktok_upload(acc, path: Path, caption: str, privacy: str = "public", on_session=None):
     info = _tiktok_creator(acc)
     options = info.get("privacy_level_options") or ["SELF_ONLY"]
     level = next((p for p in TT_PRIVACY.get(privacy, ["SELF_ONLY"]) if p in options), "SELF_ONLY" if "SELF_ONLY" in options else options[0])
@@ -596,6 +614,11 @@ def tiktok_upload(acc, path: Path, caption: str, privacy: str = "public"):
             raise
         level, note = "SELF_ONLY", "Posted as private: this server's TikTok app hasn't passed TikTok's review yet."
         box = init(level)
+    if on_session and box.get("publish_id"):
+        try:
+            on_session(box["publish_id"])
+        except Exception:
+            pass
     with path.open("rb") as f:
         for n in range(count):
             first = n * chunk
@@ -621,3 +644,19 @@ def tiktok_upload(acc, path: Path, caption: str, privacy: str = "public"):
         acc["detail"] = "Posts are private until this server's TikTok app is reviewed"
         _put(acc)
     return str(ids[0]) if ids else box["publish_id"], url
+
+
+def tiktok_check_session(acc, publish_id: str):
+    """Deterministically check if a TikTok upload completed successfully."""
+    if not publish_id:
+        return None, None
+    try:
+        st = _tt_post(acc, "/post/publish/status/fetch/", {"publish_id": publish_id}, "Checking the TikTok post")
+        if st.get("status") == "PUBLISH_COMPLETE":
+            ids = st.get("publicaly_available_post_id") or st.get("publicly_available_post_id") or []
+            user = acc.get("name", "").lstrip("@")
+            url = f"https://www.tiktok.com/@{user}/video/{ids[0]}" if ids and user else ""
+            return str(ids[0]) if ids else publish_id, url
+    except Exception:
+        pass
+    return None, None
