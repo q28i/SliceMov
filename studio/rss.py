@@ -31,9 +31,15 @@ def _clean_text(s: Optional[str], limit: int = 400) -> str:
 def parse_podcast_feed(url_or_content: str, max_episodes: int = 25) -> dict:
     """Fetch and parse an RSS podcast feed into structured podcast and episode metadata."""
     if url_or_content.strip().startswith(("http://", "https://")):
-        req = urllib.request.Request(url_or_content.strip(), headers=UA)
+        feed_url = url_or_content.strip()
+        from urllib.parse import urlparse
+        from studio.media import is_safe_host
+        u = urlparse(feed_url)
+        if not is_safe_host(u.hostname):
+            raise ValueError("Access to local or private network addresses is blocked for security (SSRF prevention).")
+        req = urllib.request.Request(feed_url, headers=UA)
         with urllib.request.urlopen(req, timeout=15) as r:
-            raw = r.read(10_000_000)  # max 10MB XML
+            raw = r.read(5_000_000)  # max 5MB XML
     else:
         raw = url_or_content.encode("utf-8") if isinstance(url_or_content, str) else url_or_content
 
@@ -129,6 +135,11 @@ def parse_podcast_feed(url_or_content: str, max_episodes: int = 25) -> dict:
 def download_podcast_episode(audio_url: str, dest_path: Path, max_bytes: int = 500_000_000) -> Path:
     """Download an episode's audio file directly to a destination path."""
     dest_path.parent.mkdir(parents=True, exist_ok=True)
+    from urllib.parse import urlparse
+    from studio.media import is_safe_host
+    u = urlparse(audio_url.strip())
+    if not is_safe_host(u.hostname):
+        raise ValueError("Access to local or private network addresses is blocked for security (SSRF prevention).")
     req = urllib.request.Request(audio_url, headers=UA)
     with urllib.request.urlopen(req, timeout=30) as resp, dest_path.open("wb") as out:
         downloaded = 0

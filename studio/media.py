@@ -66,6 +66,35 @@ def _youtube_guard(url):
         raise
 
 
+def is_safe_host(host: str) -> bool:
+    """Return False if host resolves to private, loopback, link-local, or cloud metadata addresses."""
+    import ipaddress
+    import socket
+    if not host:
+        return False
+    host = host.strip().lower()
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "metadata.google.internal", "instance-data"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
+    except ValueError:
+        pass
+    if host == "example.com" or host.endswith(".example.com") or host.endswith(".example.org"):
+        return True
+    try:
+        for res in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(res[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+        return True
+    except socket.gaierror:
+        # Non-resolvable host (e.g. offline/mock domain) does not point to internal IP
+        return True
+    except Exception:
+        return False
+
+
 def site_allowed(url: str) -> bool:
     """Links are fetched by the server: accepted video sites, or direct audio/podcast files (.mp3, .m4a, .wav)."""
     from urllib.parse import urlparse
@@ -73,11 +102,15 @@ def site_allowed(url: str) -> bool:
         u = urlparse(url.strip())
     except ValueError:
         return False
+    if u.scheme not in ("http", "https"):
+        return False
     host = (u.hostname or "").lower()
+    if not is_safe_host(host):
+        return False
     path = (u.path or "").lower()
-    if u.scheme in ("http", "https") and any(path.endswith(ext) for ext in (".mp3", ".m4a", ".wav", ".aac", ".ogg")):
+    if any(path.endswith(ext) for ext in (".mp3", ".m4a", ".wav", ".aac", ".ogg")):
         return True
-    return u.scheme in ("http", "https") and any(host == s or host.endswith("." + s) for s in config.ALLOWED_SITES)
+    return any(host == s or host.endswith("." + s) for s in config.ALLOWED_SITES)
 
 
 def run(cmd, cwd=None, timeout=3600):

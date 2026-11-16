@@ -366,6 +366,27 @@ def youtube_views(acc, ids: list) -> dict:
     return out
 
 
+def youtube_find_recent(acc, title: str):
+    """Check if a video with this title was recently uploaded to the authenticated channel."""
+    try:
+        token = _yt_token(acc)
+        r = httpx.get("https://www.googleapis.com/youtube/v3/search",
+                      params={"part": "snippet", "forMine": "true", "type": "video", "order": "date", "maxResults": 10},
+                      headers={"Authorization": f"Bearer {token}"}, timeout=15)
+        if r.status_code == 200:
+            clean_title = re.sub(r"[<>]", "", title).strip()[:100].lower()
+            for item in r.json().get("items", []):
+                snippet = item.get("snippet", {})
+                item_title = snippet.get("title", "").strip().lower()
+                if clean_title and (item_title == clean_title or clean_title in item_title):
+                    vid = item["id"].get("videoId")
+                    if vid:
+                        return vid, f"https://www.youtube.com/shorts/{vid}"
+    except Exception:
+        pass
+    return None, None
+
+
 # ------------------------------------------------------------------ Instagram (Instagram Login, professional accounts)
 def _instagram_finish(code: str) -> dict:
     cid, secret = app_keys("instagram")
@@ -456,6 +477,29 @@ def instagram_views(acc, media_id: str):
         return None
     data = r.json().get("data", [])
     return int(data[0]["values"][0]["value"]) if data else None
+
+
+def instagram_find_recent(acc, caption: str):
+    """Check if a reel with this caption prefix was recently published to this account."""
+    try:
+        token = _ig_token(acc)
+        uid = acc.get("user_id")
+        if not uid:
+            return None, None
+        r = httpx.get(f"{IG}/{uid}/media",
+                      params={"fields": "id,caption,permalink", "limit": 10},
+                      headers={"Authorization": f"Bearer {token}"}, timeout=15)
+        if r.status_code == 200:
+            clean_cap = caption.strip()[:60].lower()
+            for item in r.json().get("data", []):
+                item_cap = (item.get("caption") or "").strip().lower()
+                if clean_cap and clean_cap in item_cap:
+                    mid = item.get("id")
+                    permalink = item.get("permalink") or f"https://www.instagram.com/reel/{mid}/"
+                    return mid, permalink
+    except Exception:
+        pass
+    return None, None
 
 
 # ------------------------------------------------------------------ TikTok (Login Kit + Content Posting API)

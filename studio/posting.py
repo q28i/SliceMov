@@ -107,6 +107,7 @@ def enqueue(job, clip, account_ids, now=False) -> EnqueueResult:
             if scheduled_post:
                 if now:
                     scheduled_post["due_at"] = time.time()
+                    scheduled_post["expedited"] = True
                     scheduled_post["error"] = None
                     expedited.append(scheduled_post)
                     wake()
@@ -119,6 +120,7 @@ def enqueue(job, clip, account_ids, now=False) -> EnqueueResult:
             due = time.time() if now else _next_slot(aid, c["post_gap_min"], c["daily_cap"])
             if reusable_post:
                 reusable_post.update(status="scheduled", due_at=due, tries=0, error=None,
+                                     expedited=bool(now),
                                      title=clip.get("title") or clip.get("hook") or "Clip",
                                      score=clip.get("score", 0))
                 made.append(reusable_post)
@@ -127,7 +129,7 @@ def enqueue(job, clip, account_ids, now=False) -> EnqueueResult:
             else:
                 p = {"id": secrets.token_hex(8), "user": ctx.uid(), "job": job["id"], "clip": clip["id"], "creator": job["creator"],
                      "account": aid, "account_name": acc["name"], "platform": acc["platform"], "status": "scheduled",
-                     "due_at": due, "created": time.time(), "title": clip.get("title") or clip.get("hook") or "Clip",
+                     "due_at": due, "expedited": bool(now), "created": time.time(), "title": clip.get("title") or clip.get("hook") or "Clip",
                      "score": clip.get("score", 0), "tries": 0, "url": "", "remote_id": "", "error": None, "views": None}
                 _posts.append(p)
                 made.append(p)
@@ -181,6 +183,26 @@ def _post(p):
         path = Path(job["dir"]) / "clips" / clip["file"]
         creator = creators.get(job["creator"]) or dict(creators.DEFAULTS, name="clips")
         title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator)
+
+        # Pre-upload verification: If retrying, check if remote post already exists to prevent duplicate uploads
+        if p.get("tries", 0) > 0:
+            if acc["platform"] == "youtube" and title:
+                found_id, found_url = accounts.youtube_find_recent(acc, title)
+                if found_id:
+                    p.update(status="posted", posted_at=time.time(), remote_id=found_id, url=found_url, error=None, expedited=False)
+                    creators.log(p["creator"], f"Verified existing YouTube upload: {title}")
+                    _save()
+                    _mirror(p)
+                    return
+            elif acc["platform"] == "instagram" and title:
+                found_id, found_url = accounts.instagram_find_recent(acc, title)
+                if found_id:
+                    p.update(status="posted", posted_at=time.time(), remote_id=found_id, url=found_url, error=None, expedited=False)
+                    creators.log(p["creator"], f"Verified existing Instagram Reel: {title}")
+                    _save()
+                    _mirror(p)
+                    return
+
         if acc["platform"] == "youtube":
             rid, url = accounts.youtube_upload(acc, path, title, cap + "\n\n#Shorts", clip.get("hashtags", []), creator["privacy"])
         elif acc["platform"] == "instagram":
@@ -189,7 +211,7 @@ def _post(p):
             rid, url = accounts.tiktok_upload(acc, path, f"{title}\n\n{cap}", creator["privacy"])
         else:
             raise RuntimeError("That kind of account is no longer supported.")
-        p.update(status="posted", posted_at=time.time(), remote_id=rid, url=url, error=None)
+        p.update(status="posted", posted_at=time.time(), remote_id=rid, url=url, error=None, expedited=False)
         creators.log(p["creator"], f"Posted to {acc['name']}: {title}")
     except Exception as e:  # noqa: BLE001
         p["tries"] += 1
@@ -204,16 +226,40 @@ def _post(p):
     _mirror(p)
 
 
+_last_posted_by_account: dict = {}
+
+
 def _run():
     while True:
         _wake.wait(timeout=15)
         _wake.clear()
-        due = [p for p in list(_posts) if p["status"] == "scheduled" and p["due_at"] <= time.time() and p.get("user")]
+        due = sorted(
+            [p for p in list(_posts) if p["status"] == "scheduled" and p["due_at"] <= time.time() and p.get("user")],
+            key=lambda x: (0 if x.get("expedited") else 1, x["due_at"])
+        )
         for p in due:
             try:
                 with ctx.as_user(p["user"]):
                     if accounts.settings()["paused"]:
                         continue
+
+                    # Rate-limit / restart pacing protection:
+                    # If multiple scheduled posts for the same account are overdue after restart,
+                    # pace them out according to creator's post_gap_min unless explicitly expedited (Post Now).
+                    aid = p.get("account")
+                    if aid and not p.get("expedited"):
+                        c = creators.get(p.get("creator")) or dict(creators.DEFAULTS, name="clips")
+                        gap_sec = max(60, int((c.get("post_gap_min") or 60) * 60))
+                        last_t = _last_posted_by_account.get(aid, 0)
+                        now_t = time.time()
+                        if last_t and (now_t - last_t) < gap_sec:
+                            with _lock:
+                                if p["status"] == "scheduled":
+                                    p["due_at"] = last_t + gap_sec
+                                    _save()
+                            _mirror(p)
+                            continue
+
                     with _lock:
                         if p["status"] != "scheduled":
                             continue
@@ -221,6 +267,8 @@ def _run():
                         _save()
                     _mirror(p)
                     _post(p)
+                    if aid and p.get("status") == "posted":
+                        _last_posted_by_account[aid] = time.time()
             except Exception:  # noqa: BLE001
                 pass
 
@@ -300,6 +348,25 @@ def reconcile(pid):
                         _save()
                         _mirror(p)
                         return {"reconciled": True, "status": "posted", "url": p.get("url", "")}
+            except Exception:
+                pass
+        else:
+            # No remote_id recorded yet (e.g. timeout during HTTP request); check remote channel by title
+            try:
+                if p["platform"] == "youtube" and p.get("title"):
+                    found_id, found_url = accounts.youtube_find_recent(acc, p["title"])
+                    if found_id:
+                        p.update(status="posted", remote_id=found_id, url=found_url, error=None)
+                        _save()
+                        _mirror(p)
+                        return {"reconciled": True, "status": "posted", "url": p["url"]}
+                elif p["platform"] == "instagram" and (p.get("title") or p.get("caption")):
+                    found_id, found_url = accounts.instagram_find_recent(acc, p.get("title") or p.get("caption"))
+                    if found_id:
+                        p.update(status="posted", remote_id=found_id, url=found_url, error=None)
+                        _save()
+                        _mirror(p)
+                        return {"reconciled": True, "status": "posted", "url": p["url"]}
             except Exception:
                 pass
         p.update(status="scheduled", due_at=time.time(), tries=0, error=None)

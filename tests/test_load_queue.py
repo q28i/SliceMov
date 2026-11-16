@@ -21,14 +21,6 @@ def check(name, ok, extra=""):
         fails.append(name)
 
 
-# ---- the monitor measures something real
-load.start()
-time.sleep(2.5)
-idle = load.state()
-check("monitor reads the processor", 0 <= idle["cpu"] <= 100, str(idle))
-check("monitor reads free memory and disk", idle["ram_free_gb"] > 0.1 and idle["disk_free_gb"] > 0.1)
-
-
 def burn(until):
     while time.time() < until:
         sum(i * i for i in range(20000))
@@ -37,6 +29,13 @@ def burn(until):
 import multiprocessing  # noqa: E402
 
 if __name__ == "__main__":
+    # ---- the monitor measures something real
+    load.start()
+    time.sleep(2.5)
+    idle = load.state()
+    check("monitor reads the processor", 0 <= idle["cpu"] <= 100, str(idle))
+    check("monitor reads free memory and disk", idle["ram_free_gb"] > 0.1 and idle["disk_free_gb"] > 0.1)
+
     stop = time.time() + 22
     ps = [multiprocessing.Process(target=burn, args=(stop,)) for _ in range(os.cpu_count() or 4)]
     [p.start() for p in ps]
